@@ -45,10 +45,19 @@ export function validateBoard(rows:any[], snapshot:any) {
         throw new Error('Farm plan step length: ' + row.slug);
       }
     }
-    for (const key of ['multiple', 'growth', 'maturity']) {
+    for (const key of ['multiple']) {
       if (!Number.isFinite(row[key]) || row[key] <= 0) {
         throw new Error('Invalid model factor: ' + row.slug + '/' + key);
       }
+    }
+    if (!Number.isFinite(row.low_usd) || !Number.isFinite(row.high_usd) || row.low_usd <= 0 || row.high_usd < row.low_usd || row.implied_value_usd < row.low_usd || row.implied_value_usd > row.high_usd) {
+      throw new Error('Invalid bootstrap band: ' + row.slug);
+    }
+    if (!Number.isFinite(row.net_usd) || !Number.isFinite(row.gas_total_usd) || !Number.isFinite(row.reward_scenario_usd)) {
+      throw new Error('Invalid farm economics: ' + row.slug);
+    }
+    if (!['farm', 'thin', 'skip'].includes(row.verdict)) {
+      throw new Error('Invalid farm verdict: ' + row.slug);
     }
   }
   for (const slug of snapshot.watchlist) {
