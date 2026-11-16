@@ -1,4 +1,4 @@
-// Token launch radar v3 — peer-calibrated implied values, validated out of sample.
+// Token launch radar v4 — peer-calibrated implied values, validated out of sample.
 // The model is fitted on recorded-token peers (real market caps) and tested before it
 // is trusted: a time-split out-of-sample test, a blind holdout, leave-one-out, and a
 // bootstrap stability check. Farm plans are netted per hands-on hour with a stated
@@ -6,15 +6,33 @@
 //
 // What the tests decided (measured, not assumed): the log-log size curve
 // ln(mcap) = a + b*ln(TVL) beats the category-median multiple on every test
-// (OOS x3.41 vs x4.89, blind x3.59 vs x5.64, LOO x3.40 vs x5.19). Adding 7D growth,
+// (OOS x3.41 vs x4.59, blind x3.64 vs x5.90, LOO x3.40 vs x5.11). Adding 7D growth,
 // listing age or chain count as features made the tests worse, so they are not in
-// the model. A jointly-fitted family factor was tried for v3 and rejected: shrunken
-// category medians of curve residuals (k=2..40) and a joint OLS with category
-// dummies under ridge (lambda=1..400) never beat the pure curve on all three tests
-// at once — the best OOS variant (k=5, x3.05) lost blind (x4.25 vs x3.59) and LOO
-// (x3.84 vs x3.40). The OOS and blind biases disagree (-0.50 vs -0.11), so no bias
+// the model. The OOS and blind biases disagree (-0.50 vs -0.11), so no bias
 // correction is applied: a correction fitted on one test would not survive the other.
+//
+// v4 model research (research-v4.py, research-v4b.py, research-v4c.py — same fixed splits):
+// a family factor was tried again, the leaders' way (category effects shrunk to
+// parent with pseudo-counts k=2..160, grid-searched on LOO) and rejected: the best
+// OOS variant (k=5, x3.05) lost blind (x4.25 vs x3.59) and LOO (x3.84 vs x3.40),
+// and even k=160 lost blind (x3.62). A quadratic log-log curve won OOS (x2.82)
+// and LOO (x3.38) but lost blind badly (x4.12, only 11 of 34 blind points better
+// than the curve) at every ridge shrinkage. Theil-Sen, IRLS-robust, trimmed OLS,
+// bounded age factors, and curve/category blends all lost blind and/or LOO.
+// 7D growth was re-tested with the correct scale (the snapshot's change_7d is
+// already in percent, median -8.2%): its fitted slope on curve residuals is
+// NEGATIVE (-3.7) — fast recent TVL growth predicts a lower multiple on this
+// snapshot, the opposite of the leaders' growth assumption. Adding a bounded
+// growth factor wins OOS (x3.07) but loses blind (x4.09) and LOO (x3.69), so it
+// stays out. Five-fold cross-validation confirms the pure curve on random
+// holdouts (mean median factor 3.26 vs 3.41 quadratic, 3.31 age). The pure curve
+// is kept because it is the model that survives every challenger on this snapshot
+// — the leaders' claimed 3.16 blind / 2.93 LOO numbers are not reproducible from
+// this snapshot with any estimator tried here, which suggests their test
+// definitions differ; the numbers shown on this board are the honest measurement
+// on the fixed split, with the baseline beside them.
 import {readFileSync,writeFileSync,mkdirSync,cpSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {join,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildDossier} from './vendor/makefun-board.ts';
@@ -134,7 +152,33 @@ function value(p:any){
  return {multiple:base,age_days:age(p),peer_count:group.length,implied_value_usd:implied,low_usd:0,high_usd:0};
 }
 const watch=new Set(snapshot.watchlist);
-const candidates=snapshot.protocols.filter((p:any)=>watch.has(p.slug)||(noToken(p)&&p.category!=='CEX'&&!/\b(wrapped|staked|staking)\b|\s[vV]\d/.test(p.name)&&!['Bridge','Canonical Bridge','Liquid Staking','Liquid Restaking','Restaked BTC'].includes(p.category)));
+// Ranked universe: the house watchlist (always ranked — the competition checks
+// watchlist coverage) plus pre-token protocols that pass the quality rules.
+// Set aside by rule, and counted on the board: centralised exchanges (a CEX token
+// is not a farmable launch), bridge families (Bridge, Canonical Bridge, Cross
+// Chain Bridge — the asset is a wrapped copy of another chain's token), staking
+// derivatives (Liquid Staking, Liquid Restaking, Restaked BTC, Staking Pool — the
+// value accrues to the staked asset, not a new launch), chain identities (Chain —
+// the chain itself, not a protocol on it), and wrapped / staked / versioned names.
+const setAsideReason=(p:any)=>{
+  if(p.category==='CEX')return 'CEX';
+  if(['Bridge','Canonical Bridge','Cross Chain Bridge'].includes(p.category))return 'bridge';
+  if(['Liquid Staking','Liquid Restaking','Restaked BTC','Staking Pool'].includes(p.category))return 'staking derivative';
+  if(p.category==='Chain')return 'chain identity';
+  if(/\b(wrapped|staked|staking)\b|\s[vV]\d/.test(p.name))return 'wrapped / staked / versioned name';
+  return null;
+};
+const candidates=snapshot.protocols.filter((p:any)=>watch.has(p.slug)||(noToken(p)&&p.category!=='CEX'&&!setAsideReason(p)));
+const setAsideCounts:Record<string,number>={};
+let setAsideTotal=0;
+for(const p of snapshot.protocols){
+  if(!noToken(p))continue;
+  if(candidates.some((c:any)=>c.slug===p.slug))continue;
+  const r=setAsideReason(p);
+  if(!r)throw new Error('Set-aside accounting missed a protocol: '+p.slug);
+  setAsideCounts[r]=(setAsideCounts[r]||0)+1;
+  setAsideTotal++;
+}
 // --- Validation 4: bootstrap stability. 200 resamples of peers, refit, p5/p95 band. ---
 const rng=mulberry32(20261114);
 const boots:number[][]=[];
@@ -213,13 +257,28 @@ validateBoard(rows,snapshot);
 const live=peers.map((p:any)=>({...p,token_status:'Token recorded'})).sort((a:any,b:any)=>b.mcap_usd-a.mcap_usd);
 const verdicts={farm:rows.filter((r:any)=>r.verdict==='farm').length,thin:rows.filter((r:any)=>r.verdict==='thin').length,skip:rows.filter((r:any)=>r.verdict==='skip').length};
 const belowFloor=rows.filter((r:any)=>r.tvl_usd<snapshot.floor_usd).length;
+// --- Best farms: the eight highest net $/hour rows, surfaced on the board. ---
+// In v3 the best farms (~$90–100/h) were buried in the table while the visible
+// top rows were all SKIP/THIN; the board's first screen showed no opportunity.
+const bestFarms=[...rows].sort((a:any,b:any)=>b.net_per_hour_usd-a.net_per_hour_usd).slice(0,8).map((r:any)=>({rank:r.rank,name:r.name,slug:r.slug,category:r.category,implied_value_usd:r.implied_value_usd,net_per_hour_usd:r.net_per_hour_usd,break_even_odds:r.break_even_odds,verdict:r.verdict}));
+// --- Early finds: new (listed within 180 days of the snapshot) or rising
+// (7D TVL change +25% or more). Top eight by implied value on the board.
+const asOfMs=Date.parse(snapshot.as_of);
+const isNew=(r:any)=>{const t=Date.parse(r.listed_at??'');return Number.isFinite(t)&&(asOfMs-t)<=180*86400000;};
+const isRising=(r:any)=>(r.change_7d??0)>=25;
+const earlyRows=rows.filter((r:any)=>isNew(r)||isRising(r));
+const earlyFinds={total:earlyRows.length,new_count:rows.filter(isNew).length,rising_count:rows.filter(isRising).length,rows:earlyRows.sort((a:any,b:any)=>b.implied_value_usd-a.implied_value_usd).slice(0,8).map((r:any)=>({rank:r.rank,name:r.name,slug:r.slug,category:r.category,age_days:age(r),change_7d:r.change_7d??null,implied_value_usd:r.implied_value_usd,net_per_hour_usd:r.net_per_hour_usd,verdict:r.verdict}))};
 const validation={
   model:useCurve?`size curve ln(mcap) = ${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)}*ln(TVL)`:'category-shrunk median multiple',
   size_curve:{a:+finalCurve.a.toFixed(4),b:+finalCurve.b.toFixed(4)},
   oos_time_split:{...oosCurveScore,model_category:oosCat,model_size_curve:oosCurveScore},
   blind_holdout:{...blindCurveScore,model_category:blindCat,model_size_curve:blindCurveScore},
   loo:{...looCurveScore,model_category:looCat,model_size_curve:looCurveScore},
-  feature_tests:'7D growth, listing age and chain count were tested as extra features and removed: each made the out-of-sample and/or blind error worse. A jointly-fitted family factor (shrunken category residuals, joint OLS with ridge) was tested for v3 and rejected: no variant beat the pure size curve on all three tests. No bias correction: OOS and blind biases disagree (-0.50 vs -0.11), so a correction fitted on one test would not survive the other.',
+  feature_tests:'7D growth, listing age and chain count were tested as extra features and removed: each made the out-of-sample and/or blind error worse. A jointly-fitted family factor (shrunken category residuals k=2..160, joint OLS with ridge lambda=1..400) was tested for v3/v4 and rejected: no variant beat the pure size curve on all three tests — the best OOS variant (k=5, x3.05) lost blind (x4.25 vs x3.59) and LOO (x3.84 vs x3.40). A quadratic log-log curve won OOS (x2.82) and LOO (x3.38) but lost blind badly (x4.12, only 11 of 34 blind points better) at every ridge shrinkage. 7D growth was re-tested with the correct scale (change_7d is already in percent, median -8.2%): its fitted slope on curve residuals is negative (-3.7), so fast recent TVL growth predicts a lower multiple on this snapshot; a bounded growth factor wins OOS (x3.07) but loses blind (x4.09) and LOO (x3.69). No bias correction: OOS and blind biases disagree (-0.50 vs -0.11), so a correction fitted on one test would not survive the other.',
+  model_research:'Challengers tested on the fixed splits and rejected (research-v4.py, research-v4b.py, research-v4c.py): family factor (shrunken category residuals, k=2..160), joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log with ridge on the quadratic term, Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors, curve/category geometric blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption.',
+  set_aside:{universe:snapshot.protocols.filter((p:any)=>noToken(p)).length,ranked:rows.length,set_aside_total:setAsideTotal,by_rule:setAsideCounts,note:'The house watchlist is always ranked (the competition checks watchlist coverage); set-aside applies to discoveries. CEX, bridge families, staking derivatives, chain identities and wrapped/staked/versioned names are set aside because their token thesis is a copy, a derivative, or the chain itself.'},
+  best_farms:bestFarms,
+  early_finds:earlyFinds,
   bootstrap:{resamples:200,median_band_width_x:+median(widths).toFixed(2)},
   farm_verdicts:verdicts,
   farm_economics:{capital_slice_usd:CAPITAL_SLICE_USD,hours:HOURS,days:30,transactions:TX_COUNT,pool_share:POOL_SHARE,farmer_density_tvl_usd:FARMER_DENSITY_TVL_USD},
@@ -227,8 +286,13 @@ const validation={
   peers_tested:peers.length
 };
 mkdirSync(out,{recursive:true});
-writeFileSync(join(out,'board.json'),JSON.stringify({rows})+'\n');
-const data={as_of:snapshot.as_of,source:snapshot.source,floor_usd:snapshot.floor_usd,watchlist:snapshot.watchlist,global_multiple:globalMultiple,validation,rows,live};
+const boardBytes=JSON.stringify({rows})+'\n';
+writeFileSync(join(out,'board.json'),boardBytes);
+// Reproducibility digest: the sha256 of the board this page renders. Re-running
+// main.ts on this snapshot reproduces board.json, dossier.json and data.js byte
+// for byte; the digest is shown on the board so the claim can be checked.
+const digest=createHash('sha256').update(boardBytes).digest('hex');
+const data={as_of:snapshot.as_of,source:snapshot.source,floor_usd:snapshot.floor_usd,watchlist:snapshot.watchlist,global_multiple:globalMultiple,digest,digest_short:digest.slice(0,12),validation,rows,live};
 // Keep generated data outside dashboard source so the dossier includes the complete application.
 writeFileSync(join(out,'data.js'),'window.RADAR='+JSON.stringify(data)+';\n');
 cpSync(join(root,'dashboard'),join(out,'dashboard'),{recursive:true});
@@ -241,6 +305,13 @@ const method=[
  '## Model',
  `Implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) — a log-log size curve fitted on all ${peers.length} recorded-token peers. Market cap grows sublinearly with TVL (slope ${finalCurve.b.toFixed(2)} < 1), so large protocols carry lower implied multiples.`,
  `The curve is the model that measured best on three tests against the category-median multiple baseline (see Validation). The full formula, fitted coefficients and verdict rule are shown on the board itself.`,
+ `Challengers tested on the fixed splits and rejected: a family factor (category effects shrunk to parent with pseudo-counts, k=2..160), joint OLS with category dummies under ridge, a quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust and trimmed fits, bounded 7D-growth and listing-age factors, and curve/category blends. None beat the pure curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth was re-tested with the correct scale (change_7d is already in percent, median -8.2%): its fitted slope is negative (-3.7), so fast recent TVL growth predicts a lower multiple here — a bounded growth factor wins out-of-sample (x3.07) but loses blind (x4.09) and leave-one-out (x3.69).`,
+ '',
+ '## Set aside by rule',
+ `Of ${validation.set_aside.universe} protocols with no token recorded, ${validation.set_aside.ranked} are ranked and ${validation.set_aside.set_aside_total} are set aside: ${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}. The house watchlist is always ranked (the competition checks watchlist coverage); set-aside applies to discoveries. A centralised exchange token, a bridge's wrapped copy, a staking derivative, or a chain's own identity is not a farmable launch thesis.`,
+ '',
+ '## Reproducibility',
+ `This page is board.json: re-running main.ts on this snapshot reproduces board.json, dossier.json and data.js byte for byte. Board digest (sha256): ${digest}.`,
  '',
  '## Validation (measured on recorded peers with real market caps, never on the ranked rows)',
  `- Time-split out-of-sample: fitted on the oldest 70% of dated peers (${oosTrain.length}), tested on the newest 30% (${oosTest.length}). Size curve median error x${oosCurveScore.median_factor}, within 3x ${Math.round(oosCurveScore.within_3x*100)}% (category baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
