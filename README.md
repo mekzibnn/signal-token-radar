@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/mekzibnn/signal-token-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/mekzibnn/signal-token-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-An offline token launch radar. Implied token values come from a log-log size curve fitted on recorded-token peers and validated out of sample (time-split) and blind, with bootstrap bands, farm plans netted to the dollar with farm/thin/skip verdicts, protocol detail views and explicit assumptions. Covers every sealed-snapshot watchlist protocol.
+An offline token launch radar. Implied token values come from a log-log size curve fitted on recorded-token peers and validated three ways (time-split out-of-sample, blind holdout, leave-one-out), with bootstrap bands, a log-log scatter of the fit drawn on the board, and farm plans netted per hands-on hour with farm/thin/skip verdicts, break-even farmer counts and break-even odds. Covers every sealed-snapshot watchlist protocol. Validation is headlined as within-3× with the category baseline beside it, never within-2×.
 
 ## Run it
 

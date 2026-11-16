@@ -56,6 +56,9 @@ export function validateBoard(rows:any[], snapshot:any) {
     if (!Number.isFinite(row.net_usd) || !Number.isFinite(row.gas_total_usd) || !Number.isFinite(row.reward_scenario_usd)) {
       throw new Error('Invalid farm economics: ' + row.slug);
     }
+    if (!Number.isFinite(row.net_per_hour_usd) || !Number.isFinite(row.break_even_farmers) || row.break_even_farmers < 0 || !Number.isFinite(row.break_even_odds) || row.break_even_odds < 0 || row.break_even_odds > 1) {
+      throw new Error('Invalid farm robustness: ' + row.slug);
+    }
     if (!['farm', 'thin', 'skip'].includes(row.verdict)) {
       throw new Error('Invalid farm verdict: ' + row.slug);
     }
