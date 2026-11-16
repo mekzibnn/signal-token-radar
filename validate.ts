@@ -53,10 +53,10 @@ export function validateBoard(rows:any[], snapshot:any) {
     if (!Number.isFinite(row.low_usd) || !Number.isFinite(row.high_usd) || row.low_usd <= 0 || row.high_usd < row.low_usd || row.implied_value_usd < row.low_usd || row.implied_value_usd > row.high_usd) {
       throw new Error('Invalid bootstrap band: ' + row.slug);
     }
-    if (!Number.isFinite(row.net_usd) || !Number.isFinite(row.gas_total_usd) || !Number.isFinite(row.reward_scenario_usd)) {
+    if (!Number.isFinite(row.net_usd) || !Number.isFinite(row.gas_total_usd) || !Number.isFinite(row.reward_scenario_usd) || !Number.isFinite(row.slice_usd) || row.slice_usd < 0 || !Number.isFinite(row.total_cost_usd) || row.total_cost_usd < 0) {
       throw new Error('Invalid farm economics: ' + row.slug);
     }
-    if (!Number.isFinite(row.net_per_hour_usd) || !Number.isFinite(row.break_even_farmers) || row.break_even_farmers < 0 || !Number.isFinite(row.break_even_odds) || row.break_even_odds < 0 || row.break_even_odds > 1) {
+    if (!Number.isFinite(row.net_per_hour_usd) || !Number.isFinite(row.break_even_odds) || row.break_even_odds < 0 || row.break_even_odds > 1 || !Number.isFinite(row.deposit_usd) || row.deposit_usd <= 0 || !Number.isFinite(row.airdrop_share) || row.airdrop_share <= 0 || row.airdrop_share > 1) {
       throw new Error('Invalid farm robustness: ' + row.slug);
     }
     if (!['farm', 'thin', 'skip'].includes(row.verdict)) {
