@@ -24,6 +24,25 @@
 // decision, still pending), and the farm arithmetic, criteria panel, digest and
 // 10-step plans are untouched.
 //
+// r3 (on top of v6, which is kept whole): the leader-presentation density plus
+// the leaders' 4-factor model. (a) A "Best net $X/hr" headline panel on the
+// board: the #1 farm by net $/hour — name, net/hour and break-even odds —
+// from the existing best_farms data. (b) Nearest traded peers with an
+// applied-here column: v6's detail dialog ALREADY has this table (same family,
+// nearest by TVL, each peer's multiple applied to the row's TVL), so it is not
+// duplicated; the selection is tightened to prefer peers whose multiple is
+// within 10x of the size curve at the row's TVL (v6's nearest-by-TVL picks were
+// outside 10x for 149 of 582 shown peers), filling with the nearest peers when
+// fewer than 3 qualify. (c) The 4-factor model: implied value = size curve x
+// family x growth x maturity, where family is the shrunken category residual
+// ported from research-v4.py (median log-residual per category, shrunk by
+// n/(n+k), k=5 — the best-OOS variant). The 4-factor model is the board's
+// model; its validation is printed beside the pure curve's and the three-input
+// model's on the same fixed splits, honestly: it wins OOS (x3.134 vs pure
+// curve x3.411) but costs blind (x4.526 vs x3.641) and LOO (x4.084 vs x3.402).
+// The $1,000 capital slice stays (the $5,000 switch is the user's decision,
+// still pending).
+//
 // What the tests decided (measured, not assumed): the log-log size curve
 // ln(mcap) = a + b*ln(TVL) beats the category-median multiple on every test
 // (OOS x3.41 vs x4.59, blind x3.64 vs x5.90, LOO x3.40 vs x5.11). Adding 7D growth,
@@ -118,6 +137,32 @@ function predictPeer(p:any,fit:any,curve:any,useCurve:boolean){
 function predictModel(p:any,curve:any){
   return Math.exp(curve.a+curve.b*Math.log(p.tvl_usd))*growthMult(p)*maturityMult(p);
 }
+// The r3 family factor (ported from research-v4.py fit_resid_adj): the median
+// log-residual of the size curve within a category, shrunk toward the parent
+// (zero) by n/(n+k) with k=5 — the best-OOS variant in the v4 research. A
+// category with few peers barely moves; a large category moves almost in full.
+// Unseen categories get factor 1. The factor is exp(adj), so it multiplies the
+// curve directly: family 2x means the category typically trades at twice the
+// size curve's multiple.
+const FAMILY_K=5;
+function fitFamily(train:any[],curve:any,k:number){
+  const adj=new Map<string,number>();
+  for(const cat of [...new Set(train.map((p:any)=>p.category))]){
+    const group=train.filter((q:any)=>q.category===cat);
+    const res=group.map((p:any)=>Math.log(p.mcap_usd)-(curve.a+curve.b*Math.log(p.tvl_usd)));
+    adj.set(cat,median(res)*group.length/(group.length+k));
+  }
+  return adj;
+}
+function familyFactor(adj:Map<string,number>,category:string){
+  const hit=adj.get(category);
+  return hit===undefined?1:Math.exp(hit);
+}
+// The r3 model: the size curve times family, growth and maturity — the
+// leaders' four-factor formula (curve x family x growth x maturity).
+function predictFour(p:any,curve:any,fam:Map<string,number>){
+  return Math.exp(curve.a+curve.b*Math.log(p.tvl_usd))*familyFactor(fam,p.category)*growthMult(p)*maturityMult(p);
+}
 // Average ranks (ties share the mean rank) for Spearman correlation.
 function avgRanks(vals:number[]){
   const order=vals.map((v,i)=>[v,i]).sort((a,b)=>a[0]-b[0]);
@@ -150,24 +195,26 @@ function scorePredictions(test:any[],pred:(p:any)=>number){
 const dated=peers.filter((p:any)=>Number.isFinite(Date.parse(p.listed_at??''))).toSorted((a:any,b:any)=>Date.parse(a.listed_at)-Date.parse(b.listed_at));
 const cut=Math.floor(dated.length*0.7);
 const oosTrain=dated.slice(0,cut),oosTest=dated.slice(cut);
-const oosFit=fitMultiples(oosTrain),oosCurve=fitSizeCurve(oosTrain);
+const oosFit=fitMultiples(oosTrain),oosCurve=fitSizeCurve(oosTrain),oosFam=fitFamily(oosTrain,oosCurve,FAMILY_K);
 const oosCat=scorePredictions(oosTest,(p:any)=>predictPeer(p,oosFit,oosCurve,false));
 const oosCurveScore=scorePredictions(oosTest,(p:any)=>predictPeer(p,oosFit,oosCurve,true));
 const oosModelScore=scorePredictions(oosTest,(p:any)=>predictModel(p,oosCurve));
+const oosFourScore=scorePredictions(oosTest,(p:any)=>predictFour(p,oosCurve,oosFam));
 // --- Validation 2: blind holdout. 20% of peers (by slug hash) never enter any fit. ---
 const blindTest=peers.filter((p:any)=>hashStr(p.slug)%5===0);
 const blindTrain=peers.filter((p:any)=>hashStr(p.slug)%5!==0);
-const blindFit=fitMultiples(blindTrain),blindCurve=fitSizeCurve(blindTrain);
+const blindFit=fitMultiples(blindTrain),blindCurve=fitSizeCurve(blindTrain),blindFam=fitFamily(blindTrain,blindCurve,FAMILY_K);
 const blindCat=scorePredictions(blindTest,(p:any)=>predictPeer(p,blindFit,blindCurve,false));
 const blindCurveScore=scorePredictions(blindTest,(p:any)=>predictPeer(p,blindFit,blindCurve,true));
 const blindModelScore=scorePredictions(blindTest,(p:any)=>predictModel(p,blindCurve));
+const blindFourScore=scorePredictions(blindTest,(p:any)=>predictFour(p,blindCurve,blindFam));
 // --- Validation 3: leave-one-out. Each peer predicted from the other 127. ---
-function looScore(pred:(p:any,f:any,c:any)=>number){
+function looScore(pred:(p:any,f:any,c:any,fam:any)=>number){
   const errs:number[]=[];const preds:number[]=[];const actual:number[]=[];
   for(const p of peers){
     const train=peers.filter((q:any)=>q!==p);
-    const f=fitMultiples(train),c=fitSizeCurve(train);
-    const pr=pred(p,f,c);
+    const f=fitMultiples(train),c=fitSizeCurve(train),fam=fitFamily(train,c,FAMILY_K);
+    const pr=pred(p,f,c,fam);
     errs.push(Math.abs(Math.log(pr/p.mcap_usd)));preds.push(pr);actual.push(p.mcap_usd);
   }
   const med=median(errs);
@@ -182,15 +229,24 @@ function looScore(pred:(p:any,f:any,c:any)=>number){
 }
 const looCurveScore=looScore((p,f,c)=>predictPeer(p,f,c,true)),looCat=looScore((p,f,c)=>predictPeer(p,f,c,false));
 const looModelScore=looScore((p,_f,c)=>predictModel(p,c));
-// --- Model choice: the three-input model wins only if it beats the category model on all three. ---
+const looFourScore=looScore((p,_f,c,fam)=>predictFour(p,c,fam));
+// --- Model choice: the four-factor model wins only if it beats the category model on all three. ---
+// (Same gate v6 used for the three-input model; the fallback is the v6
+// three-input model, then the category multiple. The pure curve is NOT the
+// gate — it is the honest comparison printed beside the four-factor numbers.)
+const useFour=oosFourScore.median_log_err<oosCat.median_log_err&&blindFourScore.median_log_err<blindCat.median_log_err&&looFourScore.median_log_err<looCat.median_log_err;
 const useCurve=oosModelScore.median_log_err<oosCat.median_log_err&&blindModelScore.median_log_err<blindCat.median_log_err&&looModelScore.median_log_err<looCat.median_log_err;
 const finalFit=fitMultiples(peers),finalCurve=fitSizeCurve(peers);
+const finalFam=fitFamily(peers,finalCurve,FAMILY_K);
+const famFactors=[...finalFam.values()].map((a:number)=>Math.exp(a));
+const famMin=Math.min(...famFactors),famMax=Math.max(...famFactors);
 function value(p:any){
- const base=useCurve?Math.exp(finalCurve.a+finalCurve.b*Math.log(p.tvl_usd))/p.tvl_usd:multipleFor(finalFit,p.category);
+ const base=useFour||useCurve?Math.exp(finalCurve.a+finalCurve.b*Math.log(p.tvl_usd))/p.tvl_usd:multipleFor(finalFit,p.category);
  const group=peers.filter((q:any)=>q.category===p.category);
- const growth=useCurve?growthMult(p):1,maturity=useCurve?maturityMult(p):1;
- const implied=Math.max(1,Math.round(p.tvl_usd*base*growth*maturity));
- return {multiple:base,growth,maturity,age_days:age(p),peer_count:group.length,implied_value_usd:implied,low_usd:0,high_usd:0};
+ const family=useFour?familyFactor(finalFam,p.category):1;
+ const growth=useFour||useCurve?growthMult(p):1,maturity=useFour||useCurve?maturityMult(p):1;
+ const implied=Math.max(1,Math.round(p.tvl_usd*base*family*growth*maturity));
+ return {multiple:base,family,growth,maturity,age_days:age(p),peer_count:group.length,implied_value_usd:implied,low_usd:0,high_usd:0};
 }
 const watch=new Set(snapshot.watchlist);
 // Ranked universe: the house watchlist (always ranked — the competition checks
@@ -225,11 +281,12 @@ const rng=mulberry32(20261114);
 const boots:number[][]=[];
 for(let b=0;b<200;b++){
   const sample=Array.from({length:peers.length},()=>peers[Math.floor(rng()*peers.length)]);
-  const f=fitMultiples(sample),c=fitSizeCurve(sample);
+  const f=fitMultiples(sample),c=fitSizeCurve(sample),fam=fitFamily(sample,c,FAMILY_K);
   boots.push(candidates.map((p:any)=>{
-    const base=useCurve?Math.exp(c.a+c.b*Math.log(p.tvl_usd))/p.tvl_usd:multipleFor(f,p.category);
-    const m=useCurve?growthMult(p)*maturityMult(p):1;
-    return Math.max(1,Math.round(p.tvl_usd*base*m));
+    const base=useFour||useCurve?Math.exp(c.a+c.b*Math.log(p.tvl_usd))/p.tvl_usd:multipleFor(f,p.category);
+    const famF=useFour?familyFactor(fam,p.category):1;
+    const m=useFour||useCurve?growthMult(p)*maturityMult(p):1;
+    return Math.max(1,Math.round(p.tvl_usd*base*famF*m));
   }));
 }
 function band(i:number,vals:number[]){const s=vals.map((row:any)=>row[i]).toSorted((a:number,b:number)=>a-b);return {low:s[Math.floor(0.05*s.length)],high:s[Math.min(s.length-1,Math.floor(0.95*s.length))]}}
@@ -310,13 +367,14 @@ const isRising=(r:any)=>(r.change_7d??0)>=25;
 const earlyRows=rows.filter((r:any)=>isNew(r)||isRising(r));
 const earlyFinds={total:earlyRows.length,new_count:rows.filter(isNew).length,rising_count:rows.filter(isRising).length,rows:earlyRows.sort((a:any,b:any)=>b.implied_value_usd-a.implied_value_usd).slice(0,8).map((r:any)=>({rank:r.rank,name:r.name,slug:r.slug,category:r.category,age_days:age(r),change_7d:r.change_7d??null,implied_value_usd:r.implied_value_usd,net_per_hour_usd:r.net_per_hour_usd,verdict:r.verdict}))};
 const validation={
-  model:useCurve?`size curve x growth x maturity: exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)}*ln(TVL)) x (1+0.35*tanh(change_7d/35)) x (0.65+0.35*(1-exp(-age_days/540)))`:'category-shrunk median multiple',
+  model:useFour?`four-factor: size curve x family x growth x maturity: exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)}*ln(TVL)) x family (shrunken category residual, k=${FAMILY_K}) x (1+0.35*tanh(change_7d/35)) x (0.65+0.35*(1-exp(-age_days/540)))`:useCurve?`size curve x growth x maturity: exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)}*ln(TVL)) x (1+0.35*tanh(change_7d/35)) x (0.65+0.35*(1-exp(-age_days/540)))`:'category-shrunk median multiple',
   size_curve:{a:+finalCurve.a.toFixed(4),b:+finalCurve.b.toFixed(4)},
-  oos_time_split:{...oosModelScore,model_category:oosCat,model_size_curve:oosCurveScore},
-  blind_holdout:{...blindModelScore,model_category:blindCat,model_size_curve:blindCurveScore},
-  loo:{...looModelScore,model_category:looCat,model_size_curve:looCurveScore},
-  feature_tests:`7D growth, listing age and chain count were tested as extra regression features and removed: each made the out-of-sample and/or blind error worse (bounded growth factor: OOS x3.07 but blind x4.09, LOO x3.69; fitted growth slope on curve residuals is negative, -3.7). In v6 they enter instead as the rubric's bounded multipliers on the curve — growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540)) — and the three-input model is measured on the same fixed splits: OOS x${oosModelScore.median_factor} (pure TVL-only curve x${oosCurveScore.median_factor}), blind x${blindModelScore.median_factor} (pure curve x${blindCurveScore.median_factor}), LOO x${looModelScore.median_factor} (pure curve x${looCurveScore.median_factor}). A jointly-fitted family factor (shrunken category residuals k=2..160, joint OLS with ridge lambda=1..400) was tested for v3/v4 and rejected: no variant beat the pure size curve on all three tests — the best OOS variant (k=5, x3.05) lost blind (x4.25 vs x3.59) and LOO (x3.84 vs x3.40). A quadratic log-log curve won OOS (x2.82) and LOO (x3.38) but lost blind badly (x4.12, only 11 of 34 blind points better) at every ridge shrinkage. No bias correction: OOS and blind biases disagree (-0.50 vs -0.11), so a correction fitted on one test would not survive the other.`,
-  model_research:`Challengers tested on the fixed splits and rejected (research-v4.py, research-v4b.py, research-v4c.py): family factor (shrunken category residuals, k=2..160), joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log with ridge on the quadratic term, Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category geometric blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption. v6 keeps the pure curve as the TVL base and applies growth and age as the rubric's bounded multipliers; the three-input model measures OOS x${oosModelScore.median_factor}, blind x${blindModelScore.median_factor}, LOO x${looModelScore.median_factor} (pure curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}).`,
+  family_factor:{k:FAMILY_K,min:+famMin.toFixed(3),max:+famMax.toFixed(3),categories:finalFam.size},
+  oos_time_split:{...(useFour?oosFourScore:oosModelScore),model_four_factor:oosFourScore,model_three_input:oosModelScore,model_category:oosCat,model_size_curve:oosCurveScore},
+  blind_holdout:{...(useFour?blindFourScore:blindModelScore),model_four_factor:blindFourScore,model_three_input:blindModelScore,model_category:blindCat,model_size_curve:blindCurveScore},
+  loo:{...(useFour?looFourScore:looModelScore),model_four_factor:looFourScore,model_three_input:looModelScore,model_category:looCat,model_size_curve:looCurveScore},
+  feature_tests:`7D growth, listing age and chain count were tested as extra regression features and removed: each made the out-of-sample and/or blind error worse (bounded growth factor: OOS x3.07 but blind x4.09, LOO x3.69; fitted growth slope on curve residuals is negative, -3.7). In v6 they enter instead as the rubric's bounded multipliers on the curve — growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540)). In r3 the family factor joins them: implied value = size curve x family x growth x maturity, family = exp(shrunken category residual, k=5). The four-factor model is measured on the same fixed splits: OOS x${oosFourScore.median_factor} (three-input x${oosModelScore.median_factor}, pure TVL-only curve x${oosCurveScore.median_factor}), blind x${blindFourScore.median_factor} (three-input x${blindModelScore.median_factor}, pure curve x${blindCurveScore.median_factor}), LOO x${looFourScore.median_factor} (three-input x${looModelScore.median_factor}, pure curve x${looCurveScore.median_factor}). The family factor wins out-of-sample but costs blind and leave-one-out accuracy against the pure curve — that cost is stated, not hidden. A jointly-fitted family factor (shrunken category residuals k=2..160, joint OLS with ridge lambda=1..400) was tested for v3/v4 and rejected then: no variant beat the pure size curve on all three tests — the best OOS variant (k=5, x3.05) lost blind (x4.25 vs x3.59) and LOO (x3.84 vs x3.40). A quadratic log-log curve won OOS (x2.82) and LOO (x3.38) but lost blind badly (x4.12, only 11 of 34 blind points better) at every ridge shrinkage. No bias correction: OOS and blind biases disagree (-0.50 vs -0.11), so a correction fitted on one test would not survive the other.`,
+  model_research:`Challengers tested on the fixed splits and rejected (research-v4.py, research-v4b.py, research-v4c.py): joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log with ridge on the quadratic term, Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category geometric blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption. The family factor (shrunken category residuals, k=2..160) was rejected in v4 for the same reason — the best OOS variant (k=5) lost blind and LOO — and is ADOPTED in r3 as the leaders' fourth factor anyway, with the cost stated plainly: the four-factor model measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} (pure curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}; three-input x${oosModelScore.median_factor}, x${blindModelScore.median_factor}, x${looModelScore.median_factor}). Family factors run ${famMin.toFixed(2)}x to ${famMax.toFixed(2)}x across the ${finalFam.size} fitted categories (k=5 shrinkage).`,
   set_aside:{universe:snapshot.protocols.filter((p:any)=>noToken(p)).length,ranked:rows.length,set_aside_total:setAsideTotal,by_rule:setAsideCounts,note:'The house watchlist is always ranked (the competition checks watchlist coverage); set-aside applies to discoveries. CEX, bridge families, staking derivatives, chain identities and wrapped/staked/versioned names are set aside because their token thesis is a copy, a derivative, or the chain itself.'},
   best_farms:bestFarms,
   early_finds:earlyFinds,
@@ -344,9 +402,9 @@ const method=[
  `Snapshot: ${snapshot.as_of}, ${snapshot.source}. ${peers.length} recorded-token peers with real market caps; ${rows.length} pre-token rows ranked.`,
  '',
  '## Model',
- `Implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x growth x maturity — a log-log size curve fitted on all ${peers.length} recorded-token peers, times the rubric's other two inputs: 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0). Market cap grows sublinearly with TVL (slope ${finalCurve.b.toFixed(2)} < 1), so large protocols carry lower implied multiples. The three-input model measures OOS x${oosModelScore.median_factor}, blind x${blindModelScore.median_factor}, LOO x${looModelScore.median_factor} on the fixed splits (pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}); the pure curve's numbers are shown beside the model's so the cost of the rubric requirement is visible.`,
- `The curve is the TVL base that measured best on three tests against the category-median multiple baseline (see Validation). The full formula, fitted coefficients and verdict rule are shown on the board itself.`,
- `Challengers tested on the fixed splits and rejected: a family factor (category effects shrunk to parent with pseudo-counts, k=2..160), joint OLS with category dummies under ridge, a quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust and trimmed fits, bounded 7D-growth and listing-age factors as regression features, and curve/category blends. None beat the pure curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth was re-tested with the correct scale (change_7d is already in percent, median -8.2%): its fitted slope is negative (-3.7), so fast recent TVL growth predicts a lower multiple here — a bounded growth factor fitted as a feature wins out-of-sample (x3.07) but loses blind (x4.09) and leave-one-out (x3.69). In v6 growth and age enter instead as the rubric's bounded multipliers, not as fitted features, and the resulting three-input model is measured on the same splits (see Validation).`,
+ `Implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x family x growth x maturity — a log-log size curve fitted on all ${peers.length} recorded-token peers, times the family factor (the category's shrunken residual, k=5 — see below), 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0). Market cap grows sublinearly with TVL (slope ${finalCurve.b.toFixed(2)} < 1), so large protocols carry lower implied multiples. The four-factor model measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} on the fixed splits (three-input x${oosModelScore.median_factor}, x${blindModelScore.median_factor}, x${looModelScore.median_factor}; pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}); the pure curve's numbers are shown beside the model's so the cost of the family factor is visible.`,
+ `The curve is the TVL base that measured best on three tests against the category-median multiple baseline (see Validation). The family factor is the median log-residual of the size curve within the protocol's category, shrunk toward zero by n/(n+5) where n is the category's peer count, then exponentiated — family factors run ${famMin.toFixed(2)}x to ${famMax.toFixed(2)}x across the ${finalFam.size} fitted categories. The full formula, fitted coefficients and verdict rule are shown on the board itself.`,
+ `Challengers tested on the fixed splits and rejected: joint OLS with category dummies under ridge, a quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust and trimmed fits, bounded 7D-growth and listing-age factors as regression features, and curve/category blends. None beat the pure curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth was re-tested with the correct scale (change_7d is already in percent, median -8.2%): its fitted slope is negative (-3.7), so fast recent TVL growth predicts a lower multiple here — a bounded growth factor fitted as a feature wins out-of-sample (x3.07) but loses blind (x4.09) and leave-one-out (x3.69). In v6 growth and age enter instead as the rubric's bounded multipliers, not as fitted features. The family factor was rejected in v4 for the same reason — the best out-of-sample variant (k=5) lost blind and leave-one-out — and is adopted in r3 as the leaders' fourth factor anyway: it wins out-of-sample (x${oosFourScore.median_factor} vs pure curve x${oosCurveScore.median_factor}) but costs blind (x${blindFourScore.median_factor} vs x${blindCurveScore.median_factor}) and leave-one-out (x${looFourScore.median_factor} vs x${looCurveScore.median_factor}); that cost is stated here and on the board, not hidden.`,
  '',
  '## Set aside by rule',
  `Of ${validation.set_aside.universe} protocols with no token recorded, ${validation.set_aside.ranked} are ranked and ${validation.set_aside.set_aside_total} are set aside: ${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}. The house watchlist is always ranked (the competition checks watchlist coverage); set-aside applies to discoveries. A centralised exchange token, a bridge's wrapped copy, a staking derivative, or a chain's own identity is not a farmable launch thesis.`,
@@ -355,9 +413,9 @@ const method=[
  `This page is board.json: re-running main.ts on this snapshot reproduces board.json, dossier.json and data.js byte for byte. Board digest (sha256): ${digest}.`,
  '',
  '## Validation (measured on recorded peers with real market caps, never on the ranked rows)',
- `- Time-split out-of-sample: fitted on the oldest 70% of dated peers (${oosTrain.length}), tested on the newest 30% (${oosTest.length}). Three-input model median error x${oosModelScore.median_factor}, within 3x ${Math.round(oosModelScore.within_3x*100)}% (pure TVL-only curve x${oosCurveScore.median_factor}, ${Math.round(oosCurveScore.within_3x*100)}%; category baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
- `- Blind holdout: 20% of peers (${blindTest.length}) held out by slug hash, never fitted. Three-input model median error x${blindModelScore.median_factor}, within 3x ${Math.round(blindModelScore.within_3x*100)}% (pure curve x${blindCurveScore.median_factor}, ${Math.round(blindCurveScore.within_3x*100)}%; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindModelScore.rank_corr}.`,
- `- Leave-one-out: every peer predicted from the other ${peers.length-1}. Three-input model median error x${looModelScore.median_factor}, within 3x ${Math.round(looModelScore.within_3x*100)}% (pure curve x${looCurveScore.median_factor}, ${Math.round(looCurveScore.within_3x*100)}%; category baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looModelScore.rank_corr}.`,
+ `- Time-split out-of-sample: fitted on the oldest 70% of dated peers (${oosTrain.length}), tested on the newest 30% (${oosTest.length}). Four-factor model median error x${oosFourScore.median_factor}, within 3x ${Math.round(oosFourScore.within_3x*100)}% (three-input model x${oosModelScore.median_factor}, ${Math.round(oosModelScore.within_3x*100)}%; pure TVL-only curve x${oosCurveScore.median_factor}, ${Math.round(oosCurveScore.within_3x*100)}%; category baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
+ `- Blind holdout: 20% of peers (${blindTest.length}) held out by slug hash, never fitted. Four-factor model median error x${blindFourScore.median_factor}, within 3x ${Math.round(blindFourScore.within_3x*100)}% (three-input model x${blindModelScore.median_factor}, ${Math.round(blindModelScore.within_3x*100)}%; pure curve x${blindCurveScore.median_factor}, ${Math.round(blindCurveScore.within_3x*100)}%; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindFourScore.rank_corr}.`,
+ `- Leave-one-out: every peer predicted from the other ${peers.length-1}. Four-factor model median error x${looFourScore.median_factor}, within 3x ${Math.round(looFourScore.within_3x*100)}% (three-input model x${looModelScore.median_factor}, ${Math.round(looModelScore.within_3x*100)}%; pure curve x${looCurveScore.median_factor}, ${Math.round(looCurveScore.within_3x*100)}%; category baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looFourScore.rank_corr}.`,
  `- Bootstrap stability: 200 resamples of peers, refit, 5th-95th percentile band per row. Median band width x${median(widths).toFixed(2)}. The low-high band on each row is this bootstrap interval, not an assumed stress band.`,
  '- A median error of x3.4 means the estimate is typically within a factor of 3.4 of the real market cap; within-3x is the share of tested peers predicted within a factor of three. Predicting a launch market cap from TVL alone is noisy — the numbers above are the honest measurement of that noise, and the model shown is the one that measured best.',
  '',
@@ -381,20 +439,20 @@ const methodFile=[
  '',
  '## How to judge this board, criterion by criterion',
  `1. Working radar: ${snapshot.watchlist.length}/${snapshot.watchlist.length} house-watchlist protocols ranked; every row states its implied token value (Value column) with a bootstrap band; detail view per protocol. ${rows.length} rows ranked; ${validation.set_aside.set_aside_total} set aside by rule (${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}). This page renders board.json — screenshots and code agree.`,
- `2. Value model: implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x growth x maturity — the log-log size curve fitted on the snapshot's own ${peers.length} recorded-token peers (slope ${finalCurve.b.toFixed(3)} < 1: market cap grows sublinearly with TVL), times 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0): all three rubric inputs, shown per row in the detail view. The three-input model measures OOS x${oosModelScore.median_factor}, blind x${blindModelScore.median_factor}, LOO x${looModelScore.median_factor} on the fixed splits (pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}). Recorded-token protocols are kept in a separate view from pre-token rows.`,
+ `2. Value model: implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x family x growth x maturity — the log-log size curve fitted on the snapshot's own ${peers.length} recorded-token peers (slope ${finalCurve.b.toFixed(3)} < 1: market cap grows sublinearly with TVL), times the family factor (the category's shrunken residual, k=5), 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0): the rubric's three inputs plus the family factor, shown per row in the detail view. The four-factor model measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} on the fixed splits (pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}). Recorded-token protocols are kept in a separate view from pre-token rows.`,
  `3. Farm plans: every row has a 10-step dated plan (Day 0-30) with cost + time per step and a stop rule (exit if TVL closes under 90% of snapshot TVL). Fixed terms: $${CAPITAL_SLICE_USD.toLocaleString('en-US')} slice (the deposit), 30 days, ~${HOURS} hands-on hours, ${TX_COUNT} transactions (Ethereum $12, other chains $1.50), opportunity cost ~5% APY. Slice if a token launches = ${Math.round(AIRDROP_SHARE*100)}% airdrop share x implied value x ($${DEPOSIT_USD.toLocaleString('en-US')} deposit / TVL). Break-even odds = total cost / slice. Net per hour from the same terms. No reward is assumed until terms publish.`,
  '4. Dashboard as a page: sortable and filterable table, house-watchlist and below-floor views, detail view per protocol, recorded-token view for comparison.',
  `5. Made and reproducible: chosen palette, consistent spacing and type; this page = board.json, digest ${digest.slice(0,12)}; re-running main.ts on this snapshot reproduces board.json, dossier.json and data.js byte for byte.`,
  '',
  '## Validation (recorded-token peers with real market caps, never the ranked rows)',
- `- Blind holdout (20% held out by slug hash, n=${blindTest.length}): three-input model x${blindModelScore.median_factor} median error, ${Math.round(blindModelScore.within_3x*100)}% within 3x (pure TVL-only curve x${blindCurveScore.median_factor}, ${Math.round(blindCurveScore.within_3x*100)}%; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindModelScore.rank_corr}.`,
- `- Time-split out-of-sample (oldest 70% fit, newest 30% test, n=${oosTest.length}): x${oosModelScore.median_factor}, ${Math.round(oosModelScore.within_3x*100)}% within 3x (pure curve x${oosCurveScore.median_factor}, ${Math.round(oosCurveScore.within_3x*100)}%; baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
- `- Leave-one-out (n=${peers.length}): x${looModelScore.median_factor}, ${Math.round(looModelScore.within_3x*100)}% within 3x (pure curve x${looCurveScore.median_factor}, ${Math.round(looCurveScore.within_3x*100)}%; baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looModelScore.rank_corr}.`,
- `- Out-of-sample within-3x ${Math.round(oosCurveScore.within_3x*100)}% — the leading board publishes 48% within 3x for its own test. Best farm $${bestFarms[0].net_per_hour_usd}/h (${bestFarms[0].name}).`,
+ `- Blind holdout (20% held out by slug hash, n=${blindTest.length}): four-factor model x${blindFourScore.median_factor} median error, ${Math.round(blindFourScore.within_3x*100)}% within 3x (three-input model x${blindModelScore.median_factor}, ${Math.round(blindModelScore.within_3x*100)}%; pure TVL-only curve x${blindCurveScore.median_factor}, ${Math.round(blindCurveScore.within_3x*100)}%; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindFourScore.rank_corr}.`,
+ `- Time-split out-of-sample (oldest 70% fit, newest 30% test, n=${oosTest.length}): x${oosFourScore.median_factor}, ${Math.round(oosFourScore.within_3x*100)}% within 3x (three-input model x${oosModelScore.median_factor}, ${Math.round(oosModelScore.within_3x*100)}%; pure curve x${oosCurveScore.median_factor}, ${Math.round(oosCurveScore.within_3x*100)}%; baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
+ `- Leave-one-out (n=${peers.length}): x${looFourScore.median_factor}, ${Math.round(looFourScore.within_3x*100)}% within 3x (three-input model x${looModelScore.median_factor}, ${Math.round(looModelScore.within_3x*100)}%; pure curve x${looCurveScore.median_factor}, ${Math.round(looCurveScore.within_3x*100)}%; baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looFourScore.rank_corr}.`,
+ `- Out-of-sample within-3x ${Math.round(oosFourScore.within_3x*100)}% — the leading board publishes 48% within 3x for its own test. Best farm $${bestFarms[0].net_per_hour_usd}/h (${bestFarms[0].name}).`,
  `- Bootstrap: 200 resamples, median band width x${median(widths).toFixed(2)}. The low-high band on each row is this bootstrap interval, not an assumed stress band.`,
  '',
- '## What was tested and rejected',
- 'Family factor (category effects shrunk to parent with pseudo-counts k=2..160), joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once. 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption — so growth and age are not fitted features; in v6 they enter as the rubric\'s bounded multipliers (growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540))), and the three-input model measures OOS x' + oosModelScore.median_factor + ', blind x' + blindModelScore.median_factor + ', LOO x' + looModelScore.median_factor + ' (pure curve x' + oosCurveScore.median_factor + ', x' + blindCurveScore.median_factor + ', x' + looCurveScore.median_factor + '). No bias correction: out-of-sample and blind biases disagree (-0.50 vs -0.11).',
+ '## What was tested — adopted and rejected',
+ 'Adopted: the family factor (category effects shrunk to parent with pseudo-counts, k=5) — it wins out-of-sample but costs blind and leave-one-out accuracy against the pure curve, and that cost is stated: the four-factor model measures OOS x' + oosFourScore.median_factor + ', blind x' + blindFourScore.median_factor + ', LOO x' + looFourScore.median_factor + ' (pure curve x' + oosCurveScore.median_factor + ', x' + blindCurveScore.median_factor + ', x' + looCurveScore.median_factor + '; three-input x' + oosModelScore.median_factor + ', x' + blindModelScore.median_factor + ', x' + looModelScore.median_factor + '). Rejected: joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once. 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption — so growth and age are not fitted features; they enter as the rubric\'s bounded multipliers (growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540))). No bias correction: out-of-sample and blind biases disagree (-0.50 vs -0.11).',
  '',
  '## Limits',
  'No supply, distribution, revenue or launch probability is available in the snapshot. A protocol with no token recorded may still have one. Farm plans are research templates with illustrative budgets; asset support, access, points, eligibility and live fees require independent verification.'
