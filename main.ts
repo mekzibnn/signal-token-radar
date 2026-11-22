@@ -43,6 +43,19 @@
 // The $1,000 capital slice stays (the $5,000 switch is the user's decision,
 // still pending).
 //
+// v7 (on top of r3, which is kept whole): PRESENTATION ONLY — the model, the
+// numbers and the farm arithmetic are untouched. (a) The detail view's peers
+// table no longer fills with the nearest recorded peers regardless of
+// multiple: fills now come only from peers within 10x of the size curve at
+// the row's TVL (same family first, then any family). Every one of the 194
+// rows still shows 3 peers, and 0 shown peers sit outside 10x (r3: 100 of
+// 582 — worst, Polymarket International vs Rain, applied $128.1B against an
+// $85.0M implied value). (b) The Early-finds note now states the overlap (3
+// rows are both new and rising), so 49 new + 7 rising = 53 total reads as
+// arithmetic, not an error. (c) The Farm-next rows show break-even odds
+// beside the net $/hour (the headline already did). The $1,000 capital slice
+// stays (the $5,000 switch is the user's decision, still pending).
+//
 // What the tests decided (measured, not assumed): the log-log size curve
 // ln(mcap) = a + b*ln(TVL) beats the category-median multiple on every test
 // (OOS x3.41 vs x4.59, blind x3.64 vs x5.90, LOO x3.40 vs x5.11). Adding 7D growth,
@@ -361,11 +374,13 @@ const belowFloor=rows.filter((r:any)=>r.tvl_usd<snapshot.floor_usd).length;
 const bestFarms=[...rows].sort((a:any,b:any)=>b.net_per_hour_usd-a.net_per_hour_usd).slice(0,8).map((r:any)=>({rank:r.rank,name:r.name,slug:r.slug,category:r.category,implied_value_usd:r.implied_value_usd,net_per_hour_usd:r.net_per_hour_usd,break_even_odds:r.break_even_odds,verdict:r.verdict}));
 // --- Early finds: new (listed within 180 days of the snapshot) or rising
 // (7D TVL change +25% or more). Top eight by implied value on the board.
+// v7: both_count records the overlap (rows that are both new AND rising), so the
+// board's note can state it and 49 new + 7 rising = 53 total reads as arithmetic.
 const asOfMs=Date.parse(snapshot.as_of);
 const isNew=(r:any)=>{const t=Date.parse(r.listed_at??'');return Number.isFinite(t)&&(asOfMs-t)<=180*86400000;};
 const isRising=(r:any)=>(r.change_7d??0)>=25;
 const earlyRows=rows.filter((r:any)=>isNew(r)||isRising(r));
-const earlyFinds={total:earlyRows.length,new_count:rows.filter(isNew).length,rising_count:rows.filter(isRising).length,rows:earlyRows.sort((a:any,b:any)=>b.implied_value_usd-a.implied_value_usd).slice(0,8).map((r:any)=>({rank:r.rank,name:r.name,slug:r.slug,category:r.category,age_days:age(r),change_7d:r.change_7d??null,implied_value_usd:r.implied_value_usd,net_per_hour_usd:r.net_per_hour_usd,verdict:r.verdict}))};
+const earlyFinds={total:earlyRows.length,new_count:rows.filter(isNew).length,rising_count:rows.filter(isRising).length,both_count:rows.filter((r:any)=>isNew(r)&&isRising(r)).length,rows:earlyRows.sort((a:any,b:any)=>b.implied_value_usd-a.implied_value_usd).slice(0,8).map((r:any)=>({rank:r.rank,name:r.name,slug:r.slug,category:r.category,age_days:age(r),change_7d:r.change_7d??null,implied_value_usd:r.implied_value_usd,net_per_hour_usd:r.net_per_hour_usd,verdict:r.verdict}))};
 const validation={
   model:useFour?`four-factor: size curve x family x growth x maturity: exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)}*ln(TVL)) x family (shrunken category residual, k=${FAMILY_K}) x (1+0.35*tanh(change_7d/35)) x (0.65+0.35*(1-exp(-age_days/540)))`:useCurve?`size curve x growth x maturity: exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)}*ln(TVL)) x (1+0.35*tanh(change_7d/35)) x (0.65+0.35*(1-exp(-age_days/540)))`:'category-shrunk median multiple',
   size_curve:{a:+finalCurve.a.toFixed(4),b:+finalCurve.b.toFixed(4)},
