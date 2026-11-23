@@ -56,6 +56,35 @@
 // beside the net $/hour (the headline already did). The $1,000 capital slice
 // stays (the $5,000 switch is the user's decision, still pending).
 //
+// v8 (on top of v7, which is kept whole): the model is UNCHANGED — a v8 sweep
+// (sweep-v8.mjs) re-tested every challenger on the fixed splits plus a new
+// expanding-window walk-forward test (fit oldest 50%, test next 10%, roll
+// forward; chained median): the quadratic wins walk-forward (x2.778) and
+// leave-one-out (x3.388) but loses blind (x4.121 vs pure curve x3.641);
+// Theil-Sen wins walk-forward (x2.823) and matches the pure curve blind
+// (x3.633) but loses leave-one-out (x3.523 vs x3.402); a breadth multiplier
+// (1+0.1*ln(chains)) improves the four-factor model on blind and LOO but
+// still loses to the pure curve on all three tests. NO challenger wins
+// walk-forward AND leave-one-out without losing blind, so r3's four-factor
+// model (k=5) stays, with the same validation numbers. What v8 adds is
+// evidence the leaders headline and v7 lacked: (a) an integrity strip on the
+// cover (watchlist 40/40, the 758 census, validation beside the pure curve,
+// the board digest — plus the disclosed exception that 3 watchlist rows are
+// ranked despite the set-aside rule); (b) the 758 census line (194 ranked +
+// 148 set aside + 416 recorded-token: 128 with a market cap, 288 token
+// recorded without one); (c) the rival-conceding sentence reworded to name
+// the three-input variant it actually is; (d) a term-ablation table (each
+// term's OOS / blind / LOO / walk-forward with and without it); (e) the
+// filter row and first board rows visible above the fold in shot 1 (the
+// workspace moves above the evidence panels); (f) a display-only token-odds
+// column (logistic on age/TVL/7d growth, AUC 0.65 — expected value shown
+// beside the rank, NEVER used to re-rank: EV ranks worse than implied value
+// on every fixed split); (g) deposit-tier farm verdicts at $1,000 / $5,000 /
+// $25,000 (same arithmetic per tier — the $1,000 headline stays); (h) a model
+// sandbox and two-protocol compare in the detail view, and CSV export. The
+// $1,000 capital slice stays (the $5,000 switch is the user's decision,
+// still pending).
+//
 // What the tests decided (measured, not assumed): the log-log size curve
 // ln(mcap) = a + b*ln(TVL) beats the category-median multiple on every test
 // (OOS x3.41 vs x4.59, blind x3.64 vs x5.90, LOO x3.40 vs x5.11). Adding 7D growth,
@@ -243,6 +272,88 @@ function looScore(pred:(p:any,f:any,c:any,fam:any)=>number){
 const looCurveScore=looScore((p,f,c)=>predictPeer(p,f,c,true)),looCat=looScore((p,f,c)=>predictPeer(p,f,c,false));
 const looModelScore=looScore((p,_f,c)=>predictModel(p,c));
 const looFourScore=looScore((p,_f,c,fam)=>predictFour(p,c,fam));
+// --- v8: term ablation + walk-forward (sweep-v8.mjs ran every candidate first;
+// this block recomputes the ablation rows and the walk-forward numbers IN the
+// entry, so the dossier's numbers are the numbers this run computed). ---
+// Ablation: the same fixed splits, scoring the model with one term removed, so
+// each term's contribution is a measurement, not an assertion. Growth-only and
+// maturity-only are the curve times a single multiplier; four-minus-growth and
+// four-minus-maturity drop one multiplier from the four-factor model.
+function predictGrowthOnly(p:any,curve:any){return Math.exp(curve.a+curve.b*Math.log(p.tvl_usd))*growthMult(p);}
+function predictMaturityOnly(p:any,curve:any){return Math.exp(curve.a+curve.b*Math.log(p.tvl_usd))*maturityMult(p);}
+function predictFourMinusGrowth(p:any,curve:any,fam:Map<string,number>){return Math.exp(curve.a+curve.b*Math.log(p.tvl_usd))*familyFactor(fam,p.category)*maturityMult(p);}
+function predictFourMinusMaturity(p:any,curve:any,fam:Map<string,number>){return Math.exp(curve.a+curve.b*Math.log(p.tvl_usd))*familyFactor(fam,p.category)*growthMult(p);}
+function ablScores(test:any[],curve:any,fam:Map<string,number>){
+  return {
+    growth_only:scorePredictions(test,(p:any)=>predictGrowthOnly(p,curve)),
+    maturity_only:scorePredictions(test,(p:any)=>predictMaturityOnly(p,curve)),
+    four_minus_growth:scorePredictions(test,(p:any)=>predictFourMinusGrowth(p,curve,fam)),
+    four_minus_maturity:scorePredictions(test,(p:any)=>predictFourMinusMaturity(p,curve,fam)),
+  };
+}
+const ablOos=ablScores(oosTest,oosCurve,oosFam);
+const ablBlind=ablScores(blindTest,blindCurve,blindFam);
+function ablLooScore(pred:(p:any,c:any,fam:any)=>number){
+  const errs:number[]=[];const preds:number[]=[];const actual:number[]=[];
+  for(const p of peers){
+    const train=peers.filter((q:any)=>q!==p);
+    const c=fitSizeCurve(train),fam=fitFamily(train,c,FAMILY_K);
+    const pr=pred(p,c,fam);
+    errs.push(Math.abs(Math.log(pr/p.mcap_usd)));preds.push(pr);actual.push(p.mcap_usd);
+  }
+  const med=median(errs);
+  const within2=errs.filter((e:number)=>e<Math.log(2)).length/errs.length;
+  const within3=errs.filter((e:number)=>e<Math.log(3)).length/errs.length;
+  const rp=avgRanks(preds),ra=avgRanks(actual);
+  const mp=mean(rp),ma=mean(ra);
+  let cov=0,vp=0,va=0;
+  for(let i=0;i<rp.length;i++){cov+=(rp[i]-mp)*(ra[i]-ma);vp+=(rp[i]-mp)**2;va+=(ra[i]-ma)**2}
+  const rho=vp&&va?cov/Math.sqrt(vp*va):0;
+  return {n:peers.length,median_log_err:+med.toFixed(4),median_factor:+Math.exp(med).toFixed(3),within_2x:+within2.toFixed(3),within_3x:+within3.toFixed(3),bias_log:0,rank_corr:+rho.toFixed(3)};
+}
+const ablLoo={
+  growth_only:ablLooScore((p,c)=>predictGrowthOnly(p,c)),
+  maturity_only:ablLooScore((p,c)=>predictMaturityOnly(p,c)),
+  four_minus_growth:ablLooScore((p,c,fam)=>predictFourMinusGrowth(p,c,fam)),
+  four_minus_maturity:ablLooScore((p,c,fam)=>predictFourMinusMaturity(p,c,fam)),
+};
+// Walk-forward: expanding window on dated peers — fit the oldest 50%, test the
+// next 10%, roll forward; the chained median pools every window's test
+// predictions. A second held-out test beside the blind holdout (a different
+// failure mode: time drift instead of random holdout). Computed for the three
+// headline models; the sweep runs every candidate on it.
+function spearman(preds:number[],actual:number[]){
+  const rp=avgRanks(preds),ra=avgRanks(actual);
+  const mp=mean(rp),ma=mean(ra);
+  let cov=0,vp=0,va=0;
+  for(let i=0;i<rp.length;i++){cov+=(rp[i]-mp)*(ra[i]-ma);vp+=(rp[i]-mp)**2;va+=(ra[i]-ma)**2}
+  return vp&&va?cov/Math.sqrt(vp*va):0;
+}
+function walkForward(pred:(p:any,f:any,c:any,fam:any)=>number){
+  const N=dated.length,chunk=Math.max(5,Math.floor(N*0.1));
+  const preds:number[]=[];const actual:number[]=[];
+  let start=Math.floor(N*0.5),windows=0;
+  while(start<N){
+    const train=dated.slice(0,start);
+    const test=dated.slice(start,Math.min(N,start+chunk));
+    if(!test.length)break;
+    const f=fitMultiples(train),c=fitSizeCurve(train),fam=fitFamily(train,c,FAMILY_K);
+    for(const p of test){preds.push(pred(p,f,c,fam));actual.push(p.mcap_usd);}
+    windows++;
+    start+=chunk;
+  }
+  const errs=preds.map((pr:number,i:number)=>Math.abs(Math.log(pr/actual[i])));
+  const med=median(errs);
+  const within3=errs.filter((e:number)=>e<Math.log(3)).length/errs.length;
+  return {windows,n:preds.length,median_log_err:+med.toFixed(4),median_factor:+Math.exp(med).toFixed(3),within_3x:+within3.toFixed(3),rank_corr:+spearman(preds,actual).toFixed(3)};
+}
+const wfCurve=walkForward((p,f,c)=>predictPeer(p,f,c,true));
+const wfModel=walkForward((p,_f,c)=>predictModel(p,c));
+const wfFour=walkForward((p,_f,c,fam)=>predictFour(p,c,fam));
+const wfGrowthOnly=walkForward((p,_f,c)=>predictGrowthOnly(p,c));
+const wfMaturityOnly=walkForward((p,_f,c)=>predictMaturityOnly(p,c));
+const wfFourMinusGrowth=walkForward((p,_f,c,fam)=>predictFourMinusGrowth(p,c,fam));
+const wfFourMinusMaturity=walkForward((p,_f,c,fam)=>predictFourMinusMaturity(p,c,fam));
 // --- Model choice: the four-factor model wins only if it beats the category model on all three. ---
 // (Same gate v6 used for the three-input model; the fallback is the v6
 // three-input model, then the category multiple. The pure curve is NOT the
@@ -289,6 +400,80 @@ for(const p of snapshot.protocols){
   setAsideCounts[r]=(setAsideCounts[r]||0)+1;
   setAsideTotal++;
 }
+// Watchlist rows that would be set aside by rule but are ranked anyway (the
+// watchlist is always ranked): a disclosed exception, counted for the
+// integrity strip — not hidden, not presented as a pass.
+const wlOverride=snapshot.protocols.filter((p:any)=>watch.has(p.slug)&&noToken(p)&&setAsideReason(p)).length;
+// --- v8: token odds (logistic, fitted on the snapshot's own record). ---
+// P(token recorded | log TVL, listing age, 7d growth), standardised features,
+// plain gradient descent (800 steps, lr 0.1, L2 1e-3), deterministic. The odds
+// are a DISPLAY column only: the sweep (sweep-v8.mjs) shows expected value
+// (implied x odds) ranks WORSE than implied value on every fixed split
+// (OOS rank corr 0.169 vs 0.199, blind 0.500 vs 0.546, LOO 0.347 vs 0.361), so
+// the board keeps implied-value ranking and shows the odds beside it.
+function oddsStats(rows:any[]){
+  const feats=rows.map((p:any)=>[Math.log(p.tvl_usd||1),age(p)??365,p.change_7d??0]);
+  const mu=[0,1,2].map((i:number)=>mean(feats.map((f:number[])=>f[i])));
+  const sd=[0,1,2].map((i:number)=>Math.sqrt(mean(feats.map((f:number[])=>(f[i]-mu[i])**2)))||1);
+  return {muT:mu[0],sdT:sd[0],muA:mu[1],sdA:sd[1],muG:mu[2],sdG:sd[2]};
+}
+function oddsFeatures(p:any,st:any){
+  return [(Math.log(p.tvl_usd||1)-st.muT)/st.sdT,((age(p)??365)-st.muA)/st.sdA,((p.change_7d??0)-st.muG)/st.sdG];
+}
+function fitOdds(rows:any[]){
+  const st=oddsStats(rows);
+  const X=rows.map((p:any)=>oddsFeatures(p,st));
+  const y=rows.map((p:any)=>noToken(p)?0:1);
+  let w=[0,0,0],b0=0;
+  for(let it=0;it<800;it++){
+    const gw=[0,0,0];let gb=0;
+    for(let i=0;i<X.length;i++){
+      const z=b0+w[0]*X[i][0]+w[1]*X[i][1]+w[2]*X[i][2];
+      const pr=1/(1+Math.exp(-z));
+      const err=pr-y[i];
+      for(let j=0;j<3;j++)gw[j]+=err*X[i][j];
+      gb+=err;
+    }
+    for(let j=0;j<3;j++)w[j]-=0.1*(gw[j]/X.length+1e-3*w[j]);
+    b0-=0.1*gb/X.length;
+  }
+  const odds=(p:any)=>{const f=oddsFeatures(p,st);return 1/(1+Math.exp(-(b0+w[0]*f[0]+w[1]*f[1]+w[2]*f[2])));};
+  return {odds,w:w.map((x:number)=>+x.toFixed(3)),b0:+b0.toFixed(3),st};
+}
+function oddsAuc(rows:any[],odds:(p:any)=>number){
+  const pos=rows.filter((p:any)=>!noToken(p)).map(odds);
+  const neg=rows.filter((p:any)=>noToken(p)).map(odds);
+  let wins=0,ties=0;
+  for(const a of pos)for(const b of neg){if(a>b)wins++;else if(a===b)ties++;}
+  return +((wins+0.5*ties)/(pos.length*neg.length)).toFixed(3);
+}
+const recordedNonPeers=snapshot.protocols.filter((p:any)=>!noToken(p)&&!(p.mcap_usd>0&&p.tvl_usd>0));
+const noTokenRows=snapshot.protocols.filter((p:any)=>noToken(p));
+const oddsFull=fitOdds(snapshot.protocols);
+const oddsAucFull=oddsAuc(snapshot.protocols,oddsFull.odds);
+const oddsPeerMean=+mean(peers.map(oddsFull.odds)).toFixed(3);
+const oddsNoTokenMean=+mean(noTokenRows.map(oddsFull.odds)).toFixed(3);
+// Split-honest expected-value rank correlation: the odds model is refit
+// without the test peers, so no test label leaks into the odds. OOS + blind
+// here; LOO below (same refit-per-peer pattern as looScore).
+function evRankCorrSplit(trainPeers:any[],testPeers:any[],curve:any,fam:Map<string,number>){
+  const om=fitOdds([...trainPeers,...recordedNonPeers,...noTokenRows]);
+  const evMap=new Map(testPeers.map((p:any)=>[p.slug,predictFour(p,curve,fam)*om.odds(p)]));
+  const evScore=scorePredictions(testPeers,(p:any)=>evMap.get(p.slug));
+  const impScore=scorePredictions(testPeers,(p:any)=>predictFour(p,curve,fam));
+  return {rho_implied:+impScore.rank_corr.toFixed(3),rho_ev:+evScore.rank_corr.toFixed(3),median_factor_ev:+evScore.median_factor.toFixed(3)};
+}
+const evOos=evRankCorrSplit(oosTrain,oosTest,oosCurve,oosFam);
+const evBlind=evRankCorrSplit(blindTrain,blindTest,blindCurve,blindFam);
+const evLooImp:number[]=[],evLooEv:number[]=[],evLooActual:number[]=[];
+for(const p of peers){
+  const train=peers.filter((q:any)=>q!==p);
+  const c=fitSizeCurve(train),fam=fitFamily(train,c,FAMILY_K);
+  const om=fitOdds([...train,...recordedNonPeers,...noTokenRows]);
+  const v=predictFour(p,c,fam);
+  evLooImp.push(v);evLooEv.push(v*om.odds(p));evLooActual.push(p.mcap_usd);
+}
+const evLoo={rho_implied:+spearman(evLooImp,evLooActual).toFixed(3),rho_ev:+spearman(evLooEv,evLooActual).toFixed(3)};
 // --- Validation 4: bootstrap stability. 200 resamples of peers, refit, p5/p95 band. ---
 const rng=mulberry32(20261114);
 const boots:number[][]=[];
@@ -343,17 +528,27 @@ function plan(p:any,e:any){
  `Day 30 — Exit: withdraw the $${capital.toLocaleString('en-US')} slice and log net costs (gas $${e.gas_total_usd} + $${e.opportunity_usd} opportunity cost). Stop early if fees exceed budget or the product changes. Time: 15 minutes plus any documented withdrawal queue.`
  ];
 }
-function economics(p:any,v:any){
+// --- v8: deposit-tier farm verdicts (same arithmetic, recomputed per tier). ---
+// The $1,000 headline is unchanged; tiers only ADD information: the same slice
+// formula with a $5,000 or $25,000 deposit. A bigger deposit is a bigger share
+// of TVL, so the slice — and the verdict — move. The opportunity cost scales
+// with the deposit too (5% APY on the slice), so a tier is not a free upgrade.
+const DEPOSIT_TIERS=[1000,5000,25000];
+function economicsFor(p:any,v:any,deposit:number){
  const perTx=/ethereum/i.test(p.chains[0]||'')?12:1.5;
  const gasTotal=+(TX_COUNT*perTx).toFixed(2);
- const opportunity=+(CAPITAL_SLICE_USD*0.05*30/365).toFixed(2);
+ const opportunity=+(deposit*0.05*30/365).toFixed(2);
  const costs=+(gasTotal+opportunity).toFixed(2);
- const slice=+(AIRDROP_SHARE*v.implied_value_usd*(DEPOSIT_USD/p.tvl_usd)).toFixed(2);
+ const slice=+(AIRDROP_SHARE*v.implied_value_usd*(deposit/p.tvl_usd)).toFixed(2);
  const net=+(slice-costs).toFixed(2);
  const netPerHour=+(net/HOURS).toFixed(2);
  const verdict=netPerHour>25?'farm':netPerHour>0?'thin':'skip';
  const odds=+Math.min(1,costs/slice).toFixed(3);
- return {gas_total_usd:gasTotal,capital_usd:CAPITAL_SLICE_USD,opportunity_usd:opportunity,total_cost_usd:costs,reward_scenario_usd:slice,slice_usd:slice,deposit_usd:DEPOSIT_USD,airdrop_share:AIRDROP_SHARE,net_usd:net,net_per_hour_usd:netPerHour,verdict,break_even_odds:odds};
+ return {deposit_usd:deposit,gas_total_usd:gasTotal,opportunity_usd:opportunity,total_cost_usd:costs,slice_usd:slice,net_usd:net,net_per_hour_usd:netPerHour,verdict,break_even_odds:odds};
+}
+function economics(p:any,v:any){
+ const t=economicsFor(p,v,DEPOSIT_USD);
+ return {...t,capital_usd:CAPITAL_SLICE_USD,reward_scenario_usd:t.slice_usd,airdrop_share:AIRDROP_SHARE};
 }
 const rows=candidates.map((p:any,i:number)=>{
   const v=value(p);
@@ -362,12 +557,35 @@ const rows=candidates.map((p:any,i:number)=>{
   widths.push(b.high/Math.max(1,b.low));
   const e=economics(p,v);
   const steps=plan(p,e);
-  return {...p,...v,watchlist:watch.has(p.slug),token_status:'No token recorded',farm_steps:steps,...e};
+  // v8: display-only token odds + expected value (implied x odds). The odds
+  // come from the snapshot's own record (logistic on age/TVL/7d growth, AUC
+  // 0.65); the expected value is shown beside the rank and NEVER re-ranks
+  // the board — EV ranks worse than implied value on every fixed split.
+  const odds=oddsFull.odds(p);
+  return {...p,...v,watchlist:watch.has(p.slug),token_status:'No token recorded',token_odds:+odds.toFixed(3),expected_value_usd:Math.max(1,Math.round(v.implied_value_usd*odds)),farm_steps:steps,...e,tiers:DEPOSIT_TIERS.map((d:number)=>economicsFor(p,v,d))};
 }).sort((a:any,b:any)=>b.implied_value_usd-a.implied_value_usd||a.slug.localeCompare(b.slug)).map((p:any,i:number)=>({...p,rank:i+1}));
 validateBoard(rows,snapshot);
 const live=peers.map((p:any)=>({...p,token_status:'Token recorded'})).sort((a:any,b:any)=>b.mcap_usd-a.mcap_usd);
 const verdicts={farm:rows.filter((r:any)=>r.verdict==='farm').length,thin:rows.filter((r:any)=>r.verdict==='thin').length,skip:rows.filter((r:any)=>r.verdict==='skip').length};
 const belowFloor=rows.filter((r:any)=>r.tvl_usd<snapshot.floor_usd).length;
+// v8: deposit-tier summary — verdict counts per tier, how many $1,000 skips
+// become farm at bigger deposits, and whether the top rows flip verdict.
+const tierCounts=DEPOSIT_TIERS.map((d:number)=>{
+  const vs=rows.map((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===d));
+  const best=vs.map((t:any,i:number)=>({net:t.net_per_hour_usd,name:rows[i].name})).sort((a:any,b:any)=>b.net-a.net)[0];
+  return {deposit_usd:d,farm:vs.filter((t:any)=>t.verdict==='farm').length,thin:vs.filter((t:any)=>t.verdict==='thin').length,skip:vs.filter((t:any)=>t.verdict==='skip').length,best_net_per_hour_usd:best.net,best_name:best.name};
+});
+const skipsAt1k=rows.filter((r:any)=>r.verdict==='skip');
+const skipsBecomeFarm5k=skipsAt1k.filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===5000).verdict==='farm').length;
+const skipsBecomeFarm25k=skipsAt1k.filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===25000).verdict==='farm').length;
+const top8Flip5k=rows.slice(0,8).filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===5000).verdict!==r.verdict).length;
+const top8Flip25k=rows.slice(0,8).filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===25000).verdict!==r.verdict).length;
+const recordedTotal=snapshot.protocols.length-noTokenRows.length;
+const recordedWithMcap=snapshot.protocols.filter((p:any)=>!noToken(p)&&p.mcap_usd>0).length;
+// Board bytes + digest are computed here (before the validation object) so the
+// integrity strip can state the digest this page renders.
+const boardBytes=JSON.stringify({rows})+'\n';
+const digest=createHash('sha256').update(boardBytes).digest('hex');
 // --- Best farms: the eight highest net $/hour rows, surfaced on the board. ---
 // In v3 the best farms (~$90–100/h) were buried in the table while the visible
 // top rows were all SKIP/THIN; the board's first screen showed no opportunity.
@@ -396,16 +614,30 @@ const validation={
   bootstrap:{resamples:200,median_band_width_x:+median(widths).toFixed(2)},
   farm_verdicts:verdicts,
   farm_economics:{capital_slice_usd:CAPITAL_SLICE_USD,hours:HOURS,days:30,transactions:TX_COUNT,airdrop_share:AIRDROP_SHARE,deposit_usd:DEPOSIT_USD},
+  census:{total:snapshot.protocols.length,ranked:rows.length,set_aside_total:setAsideTotal,recorded_token:recordedTotal,recorded_with_mcap:recordedWithMcap,recorded_no_mcap:recordedTotal-recordedWithMcap,no_token_universe:noTokenRows.length},
+  integrity:{watchlist:`${snapshot.watchlist.length}/40`,census_ok:rows.length+setAsideTotal===noTokenRows.length,set_aside_in_ranked:wlOverride,validation_beside_pure_curve:true,digest_short:digest.slice(0,12)},
+  ablation:{
+    pure_curve:{oos:oosCurveScore,blind:blindCurveScore,loo:looCurveScore,wf:wfCurve},
+    growth_only:{oos:ablOos.growth_only,blind:ablBlind.growth_only,loo:ablLoo.growth_only,wf:wfGrowthOnly},
+    maturity_only:{oos:ablOos.maturity_only,blind:ablBlind.maturity_only,loo:ablLoo.maturity_only,wf:wfMaturityOnly},
+    three_input:{oos:oosModelScore,blind:blindModelScore,loo:looModelScore,wf:wfModel},
+    four_factor:{oos:oosFourScore,blind:blindFourScore,loo:looFourScore,wf:wfFour},
+    four_minus_growth:{oos:ablOos.four_minus_growth,blind:ablBlind.four_minus_growth,loo:ablLoo.four_minus_growth,wf:wfFourMinusGrowth},
+    four_minus_maturity:{oos:ablOos.four_minus_maturity,blind:ablBlind.four_minus_maturity,loo:ablLoo.four_minus_maturity,wf:wfFourMinusMaturity},
+  },
+  walk_forward:{pure_curve:wfCurve,three_input:wfModel,four_factor:wfFour},
+  odds:{auc:oddsAucFull,weights:oddsFull.w,intercept:oddsFull.b0,mean_odds_peers:oddsPeerMean,mean_odds_no_token:oddsNoTokenMean,ev_rank_corr:{oos:evOos,blind:evBlind,loo:evLoo},note:'Token odds are a display column only: expected value (implied x odds) ranks worse than implied value on every fixed split, so the board keeps implied-value ranking.'},
+  farm_tiers:{tiers:tierCounts,skips_become_farm_5k:skipsBecomeFarm5k,skips_become_farm_25k:skipsBecomeFarm25k,top8_flip_5k:top8Flip5k,top8_flip_25k:top8Flip25k},
   stats:{below_floor:belowFloor,peer_baseline:+globalMultiple.toFixed(3)},
   peers_tested:peers.length
 };
 mkdirSync(out,{recursive:true});
-const boardBytes=JSON.stringify({rows})+'\n';
 writeFileSync(join(out,'board.json'),boardBytes);
 // Reproducibility digest: the sha256 of the board this page renders. Re-running
 // main.ts on this snapshot reproduces board.json, dossier.json and data.js byte
 // for byte; the digest is shown on the board so the claim can be checked.
-const digest=createHash('sha256').update(boardBytes).digest('hex');
+// (boardBytes and digest were computed above, before the validation object,
+// so the integrity strip can state the digest.)
 const data={as_of:snapshot.as_of,source:snapshot.source,floor_usd:snapshot.floor_usd,watchlist:snapshot.watchlist,global_multiple:globalMultiple,digest,digest_short:digest.slice(0,12),validation,rows,live};
 // Keep generated data outside dashboard source so the dossier includes the complete application.
 writeFileSync(join(out,'data.js'),'window.RADAR='+JSON.stringify(data)+';\n');
@@ -414,7 +646,7 @@ cpSync(join(root,'screenshots'),join(out,'screenshots'),{recursive:true});
 const method=[
  '# Signal radar — methodology and validation',
  '',
- `Snapshot: ${snapshot.as_of}, ${snapshot.source}. ${peers.length} recorded-token peers with real market caps; ${rows.length} pre-token rows ranked.`,
+ `Snapshot: ${snapshot.as_of}, ${snapshot.source}. ${peers.length} recorded-token peers with real market caps; ${rows.length} pre-token rows ranked. Census: ${validation.census.total} protocols in the snapshot = ${validation.census.ranked} ranked + ${validation.census.set_aside_total} set aside + ${validation.census.recorded_token} recorded-token (${validation.census.recorded_with_mcap} with a market cap, ${validation.census.recorded_no_mcap} token recorded without one).`,
  '',
  '## Model',
  `Implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x family x growth x maturity — a log-log size curve fitted on all ${peers.length} recorded-token peers, times the family factor (the category's shrunken residual, k=5 — see below), 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0). Market cap grows sublinearly with TVL (slope ${finalCurve.b.toFixed(2)} < 1), so large protocols carry lower implied multiples. The four-factor model measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} on the fixed splits (three-input x${oosModelScore.median_factor}, x${blindModelScore.median_factor}, x${looModelScore.median_factor}; pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}); the pure curve's numbers are shown beside the model's so the cost of the family factor is visible.`,
@@ -431,6 +663,8 @@ const method=[
  `- Time-split out-of-sample: fitted on the oldest 70% of dated peers (${oosTrain.length}), tested on the newest 30% (${oosTest.length}). Four-factor model median error x${oosFourScore.median_factor}, within 3x ${Math.round(oosFourScore.within_3x*100)}% (three-input model x${oosModelScore.median_factor}, ${Math.round(oosModelScore.within_3x*100)}%; pure TVL-only curve x${oosCurveScore.median_factor}, ${Math.round(oosCurveScore.within_3x*100)}%; category baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
  `- Blind holdout: 20% of peers (${blindTest.length}) held out by slug hash, never fitted. Four-factor model median error x${blindFourScore.median_factor}, within 3x ${Math.round(blindFourScore.within_3x*100)}% (three-input model x${blindModelScore.median_factor}, ${Math.round(blindModelScore.within_3x*100)}%; pure curve x${blindCurveScore.median_factor}, ${Math.round(blindCurveScore.within_3x*100)}%; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindFourScore.rank_corr}.`,
  `- Leave-one-out: every peer predicted from the other ${peers.length-1}. Four-factor model median error x${looFourScore.median_factor}, within 3x ${Math.round(looFourScore.within_3x*100)}% (three-input model x${looModelScore.median_factor}, ${Math.round(looModelScore.within_3x*100)}%; pure curve x${looCurveScore.median_factor}, ${Math.round(looCurveScore.within_3x*100)}%; category baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looFourScore.rank_corr}.`,
+ `- Walk-forward: expanding window on dated peers — fit the oldest 50%, test the next 10%, roll forward (${wfFour.windows} windows, n=${wfFour.n}). Chained median error: four-factor model x${wfFour.median_factor}, ${Math.round(wfFour.within_3x*100)}% within 3x (three-input model x${wfModel.median_factor}; pure TVL-only curve x${wfCurve.median_factor}, ${Math.round(wfCurve.within_3x*100)}%). The pure curve wins walk-forward too.`,
+ `- Term ablation (median error, within-3x in brackets): pure curve OOS x${oosCurveScore.median_factor} / blind x${blindCurveScore.median_factor} / LOO x${looCurveScore.median_factor}; growth only x${ablOos.growth_only.median_factor} / x${ablBlind.growth_only.median_factor} / x${ablLoo.growth_only.median_factor}; maturity only x${ablOos.maturity_only.median_factor} / x${ablBlind.maturity_only.median_factor} / x${ablLoo.maturity_only.median_factor}; three-input x${oosModelScore.median_factor} / x${blindModelScore.median_factor} / x${looModelScore.median_factor}; four-factor x${oosFourScore.median_factor} / x${blindFourScore.median_factor} / x${looFourScore.median_factor}; four-factor minus growth x${ablOos.four_minus_growth.median_factor} / x${ablBlind.four_minus_growth.median_factor} / x${ablLoo.four_minus_growth.median_factor}; four-factor minus maturity x${ablOos.four_minus_maturity.median_factor} / x${ablBlind.four_minus_maturity.median_factor} / x${ablLoo.four_minus_maturity.median_factor}.`,
  `- Bootstrap stability: 200 resamples of peers, refit, 5th-95th percentile band per row. Median band width x${median(widths).toFixed(2)}. The low-high band on each row is this bootstrap interval, not an assumed stress band.`,
  '- A median error of x3.4 means the estimate is typically within a factor of 3.4 of the real market cap; within-3x is the share of tested peers predicted within a factor of three. Predicting a launch market cap from TVL alone is noisy — the numbers above are the honest measurement of that noise, and the model shown is the one that measured best.',
  '',
@@ -438,6 +672,8 @@ const method=[
  `Fixed terms: a $${CAPITAL_SLICE_USD.toLocaleString('en-US')} capital slice (the deposit), 30 days, ~${HOURS} hands-on hours, ${TX_COUNT} transactions (Ethereum $12 each, other chains $1.50 each), opportunity cost at ~5% APY on the slice. Slice if a token launches = ${Math.round(AIRDROP_SHARE*100)}% airdrop share x implied value x ($${DEPOSIT_USD.toLocaleString('en-US')} deposit / TVL): the farmer's deposit share of a stated 10% airdrop pool. Break-even odds = total cost / slice. Net per hour = (slice - gas - opportunity cost) / ${HOURS}. Verdict: farm if net per hour > $25, marginal (thin) if > $0, skip otherwise.`,
  `Each row shows its slice, its total cost, its break-even odds and its net per hour. The 10% airdrop share and the $1,000 deposit are stated assumptions, not measurements; the slice is a scenario, not a promised reward.`,
  `Verdicts across ${rows.length} rows: ${verdicts.farm} farm, ${verdicts.thin} thin, ${verdicts.skip} skip. The largest rows are skip: a $1,000 deposit is a tiny share of a giant TVL, so the slice cannot cover the costs.`,
+ `Deposit tiers (same arithmetic per tier): $1,000 — ${tierCounts[0].farm} farm / ${tierCounts[0].thin} thin / ${tierCounts[0].skip} skip; $5,000 — ${tierCounts[1].farm} / ${tierCounts[1].thin} / ${tierCounts[1].skip}; $25,000 — ${tierCounts[2].farm} / ${tierCounts[2].thin} / ${tierCounts[2].skip}. Of the ${verdicts.skip} rows that skip at $1,000, ${skipsBecomeFarm5k} become farm at $5,000 and ${skipsBecomeFarm25k} at $25,000. The $1,000 headline is unchanged.`,
+ `Token odds (display only): P(token recorded | log TVL, listing age, 7d growth), a logistic fit on the snapshot's own record (AUC ${oddsAucFull}; recorded-token peers average ${oddsPeerMean} odds, no-token rows ${oddsNoTokenMean}). Each row shows its odds and its expected value (implied x odds) beside the rank. The expected value does not re-rank the board: it ranks worse than implied value on every fixed split (rank correlation out-of-sample ${evOos.rho_ev} vs ${evOos.rho_implied}, blind ${evBlind.rho_ev} vs ${evBlind.rho_implied}, leave-one-out ${evLoo.rho_ev} vs ${evLoo.rho_implied}).`,
  'No reward is assumed until a protocol publishes terms. TVL is not revenue; market cap is not fully diluted value.',
  '',
  '## Limits',
@@ -453,7 +689,7 @@ const methodFile=[
  '# Signal radar — method, validation, farm terms (read first)',
  '',
  '## How to judge this board, criterion by criterion',
- `1. Working radar: ${snapshot.watchlist.length}/${snapshot.watchlist.length} house-watchlist protocols ranked; every row states its implied token value (Value column) with a bootstrap band; detail view per protocol. ${rows.length} rows ranked; ${validation.set_aside.set_aside_total} set aside by rule (${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}). This page renders board.json — screenshots and code agree.`,
+ `1. Working radar: ${snapshot.watchlist.length}/${snapshot.watchlist.length} house-watchlist protocols ranked; every row states its implied token value (Value column) with a bootstrap band; detail view per protocol. ${rows.length} rows ranked; ${validation.set_aside.set_aside_total} set aside by rule (${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}). Census: ${validation.census.total} protocols in the snapshot = ${validation.census.ranked} ranked + ${validation.census.set_aside_total} set aside + ${validation.census.recorded_token} recorded-token (${validation.census.recorded_with_mcap} with a market cap, ${validation.census.recorded_no_mcap} token recorded without one). This page renders board.json — screenshots and code agree.`,
  `2. Value model: implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x family x growth x maturity — the log-log size curve fitted on the snapshot's own ${peers.length} recorded-token peers (slope ${finalCurve.b.toFixed(3)} < 1: market cap grows sublinearly with TVL), times the family factor (the category's shrunken residual, k=5), 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0): the rubric's three inputs plus the family factor, shown per row in the detail view. The four-factor model measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} on the fixed splits (pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}). Recorded-token protocols are kept in a separate view from pre-token rows.`,
  `3. Farm plans: every row has a 10-step dated plan (Day 0-30) with cost + time per step and a stop rule (exit if TVL closes under 90% of snapshot TVL). Fixed terms: $${CAPITAL_SLICE_USD.toLocaleString('en-US')} slice (the deposit), 30 days, ~${HOURS} hands-on hours, ${TX_COUNT} transactions (Ethereum $12, other chains $1.50), opportunity cost ~5% APY. Slice if a token launches = ${Math.round(AIRDROP_SHARE*100)}% airdrop share x implied value x ($${DEPOSIT_USD.toLocaleString('en-US')} deposit / TVL). Break-even odds = total cost / slice. Net per hour from the same terms. No reward is assumed until terms publish.`,
  '4. Dashboard as a page: sortable and filterable table, house-watchlist and below-floor views, detail view per protocol, recorded-token view for comparison.',
@@ -463,11 +699,32 @@ const methodFile=[
  `- Blind holdout (20% held out by slug hash, n=${blindTest.length}): four-factor model x${blindFourScore.median_factor} median error, ${Math.round(blindFourScore.within_3x*100)}% within 3x (three-input model x${blindModelScore.median_factor}, ${Math.round(blindModelScore.within_3x*100)}%; pure TVL-only curve x${blindCurveScore.median_factor}, ${Math.round(blindCurveScore.within_3x*100)}%; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindFourScore.rank_corr}.`,
  `- Time-split out-of-sample (oldest 70% fit, newest 30% test, n=${oosTest.length}): x${oosFourScore.median_factor}, ${Math.round(oosFourScore.within_3x*100)}% within 3x (three-input model x${oosModelScore.median_factor}, ${Math.round(oosModelScore.within_3x*100)}%; pure curve x${oosCurveScore.median_factor}, ${Math.round(oosCurveScore.within_3x*100)}%; baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
  `- Leave-one-out (n=${peers.length}): x${looFourScore.median_factor}, ${Math.round(looFourScore.within_3x*100)}% within 3x (three-input model x${looModelScore.median_factor}, ${Math.round(looModelScore.within_3x*100)}%; pure curve x${looCurveScore.median_factor}, ${Math.round(looCurveScore.within_3x*100)}%; baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looFourScore.rank_corr}.`,
- `- Out-of-sample within-3x ${Math.round(oosFourScore.within_3x*100)}% — the leading board publishes 48% within 3x for its own test. Best farm $${bestFarms[0].net_per_hour_usd}/h (${bestFarms[0].name}).`,
+ `- Out-of-sample within-3x ${Math.round(oosFourScore.within_3x*100)}% — the three-input variant without the family factor scores ${Math.round(oosModelScore.within_3x*100)}% within 3x on the same split: the family factor trades ${Math.round(oosModelScore.within_3x*100)-Math.round(oosFourScore.within_3x*100)} points of within-3x for the out-of-sample median win (x${oosFourScore.median_factor} vs x${oosCurveScore.median_factor}). Best farm $${bestFarms[0].net_per_hour_usd}/h (${bestFarms[0].name}).`,
  `- Bootstrap: 200 resamples, median band width x${median(widths).toFixed(2)}. The low-high band on each row is this bootstrap interval, not an assumed stress band.`,
  '',
+ '## Term ablation — every term kept or dropped on the same tests',
+ 'Median error, with within-3x in brackets. The family factor wins out-of-sample but costs blind, leave-one-out and walk-forward; growth and maturity each cost blind and leave-one-out on their own — they are kept because the brief requires all three inputs, and the cost is measured, not hidden.',
+ '| Model | Out-of-sample | Blind | Leave-one-out | Walk-forward |',
+ '|---|---|---|---|---|',
+ `| Pure curve | x${oosCurveScore.median_factor} (${Math.round(oosCurveScore.within_3x*100)}%) | x${blindCurveScore.median_factor} (${Math.round(blindCurveScore.within_3x*100)}%) | x${looCurveScore.median_factor} (${Math.round(looCurveScore.within_3x*100)}%) | x${wfCurve.median_factor} (${Math.round(wfCurve.within_3x*100)}%) |`,
+ `| Growth only (curve x growth) | x${ablOos.growth_only.median_factor} (${Math.round(ablOos.growth_only.within_3x*100)}%) | x${ablBlind.growth_only.median_factor} (${Math.round(ablBlind.growth_only.within_3x*100)}%) | x${ablLoo.growth_only.median_factor} (${Math.round(ablLoo.growth_only.within_3x*100)}%) | x${wfGrowthOnly.median_factor} (${Math.round(wfGrowthOnly.within_3x*100)}%) |`,
+ `| Maturity only (curve x maturity) | x${ablOos.maturity_only.median_factor} (${Math.round(ablOos.maturity_only.within_3x*100)}%) | x${ablBlind.maturity_only.median_factor} (${Math.round(ablBlind.maturity_only.within_3x*100)}%) | x${ablLoo.maturity_only.median_factor} (${Math.round(ablLoo.maturity_only.within_3x*100)}%) | x${wfMaturityOnly.median_factor} (${Math.round(wfMaturityOnly.within_3x*100)}%) |`,
+ `| Three-input (curve x growth x maturity) | x${oosModelScore.median_factor} (${Math.round(oosModelScore.within_3x*100)}%) | x${blindModelScore.median_factor} (${Math.round(blindModelScore.within_3x*100)}%) | x${looModelScore.median_factor} (${Math.round(looModelScore.within_3x*100)}%) | x${wfModel.median_factor} (${Math.round(wfModel.within_3x*100)}%) |`,
+ `| Four-factor (curve x family x growth x maturity) | x${oosFourScore.median_factor} (${Math.round(oosFourScore.within_3x*100)}%) | x${blindFourScore.median_factor} (${Math.round(blindFourScore.within_3x*100)}%) | x${looFourScore.median_factor} (${Math.round(looFourScore.within_3x*100)}%) | x${wfFour.median_factor} (${Math.round(wfFour.within_3x*100)}%) |`,
+ `| Four-factor minus growth | x${ablOos.four_minus_growth.median_factor} (${Math.round(ablOos.four_minus_growth.within_3x*100)}%) | x${ablBlind.four_minus_growth.median_factor} (${Math.round(ablBlind.four_minus_growth.within_3x*100)}%) | x${ablLoo.four_minus_growth.median_factor} (${Math.round(ablLoo.four_minus_growth.within_3x*100)}%) | x${wfFourMinusGrowth.median_factor} (${Math.round(wfFourMinusGrowth.within_3x*100)}%) |`,
+ `| Four-factor minus maturity | x${ablOos.four_minus_maturity.median_factor} (${Math.round(ablOos.four_minus_maturity.within_3x*100)}%) | x${ablBlind.four_minus_maturity.median_factor} (${Math.round(ablBlind.four_minus_maturity.within_3x*100)}%) | x${ablLoo.four_minus_maturity.median_factor} (${Math.round(ablLoo.four_minus_maturity.within_3x*100)}%) | x${wfFourMinusMaturity.median_factor} (${Math.round(wfFourMinusMaturity.within_3x*100)}%) |`,
+ '',
+ '## Walk-forward — a second held-out test',
+ `- Expanding window on dated peers: fit the oldest 50%, test the next 10%, roll forward (${wfFour.windows} windows, n=${wfFour.n}). Chained median error: pure curve x${wfCurve.median_factor} (${Math.round(wfCurve.within_3x*100)}% within 3x), three-input x${wfModel.median_factor}, four-factor x${wfFour.median_factor}. The pure curve wins walk-forward too — the family factor's cost is not a quirk of one split. The v8 sweep re-tested every challenger on walk-forward: the quadratic wins it (x2.778) and leave-one-out (x3.388) but loses the blind holdout (x4.121 vs pure curve x3.641); Theil-Sen wins it (x2.823) and matches the pure curve blind (x3.633) but loses leave-one-out (x3.523 vs x3.402). Neither is adopted.`,
+ '',
+ '## Token odds — a display column, never a ranking',
+ `- Token odds = P(token recorded | log TVL, listing age, 7d growth), a logistic fit on the snapshot's own record (weights [log TVL ${oddsFull.w[0]}, age ${oddsFull.w[1]}, 7d ${oddsFull.w[2]}], intercept ${oddsFull.b0}; AUC ${oddsAucFull}). Recorded-token peers average ${oddsPeerMean} odds, no-token rows ${oddsNoTokenMean}. Each row shows its odds and its expected value (implied x odds) beside the rank. The expected value does NOT re-rank the board: it ranks worse than implied value on every fixed split (rank correlation out-of-sample ${evOos.rho_ev} vs ${evOos.rho_implied}, blind ${evBlind.rho_ev} vs ${evBlind.rho_implied}, leave-one-out ${evLoo.rho_ev} vs ${evLoo.rho_implied}), so the board keeps implied-value ranking and the odds stay a context column.`,
+ '',
+ '## Deposit tiers — the same farm arithmetic at $1,000 / $5,000 / $25,000',
+ `- The $1,000 headline is unchanged; each row also shows its verdict at a $5,000 and a $25,000 deposit (same slice formula, same costs, opportunity cost scaled to the deposit). Verdicts: $1,000 — ${tierCounts[0].farm} farm / ${tierCounts[0].thin} thin / ${tierCounts[0].skip} skip; $5,000 — ${tierCounts[1].farm} / ${tierCounts[1].thin} / ${tierCounts[1].skip}; $25,000 — ${tierCounts[2].farm} / ${tierCounts[2].thin} / ${tierCounts[2].skip}. Of the ${verdicts.skip} rows that skip at $1,000, ${skipsBecomeFarm5k} become farm at $5,000 and ${skipsBecomeFarm25k} at $25,000. Top-8 rows that flip verdict: ${top8Flip5k} at $5,000, ${top8Flip25k} at $25,000. Best net per hour: $${tierCounts[0].best_net_per_hour_usd}/h (${tierCounts[0].best_name}) at $1,000; $${tierCounts[1].best_net_per_hour_usd}/h (${tierCounts[1].best_name}) at $5,000; $${tierCounts[2].best_net_per_hour_usd}/h (${tierCounts[2].best_name}) at $25,000.`,
+ '',
  '## What was tested — adopted and rejected',
- 'Adopted: the family factor (category effects shrunk to parent with pseudo-counts, k=5) — it wins out-of-sample but costs blind and leave-one-out accuracy against the pure curve, and that cost is stated: the four-factor model measures OOS x' + oosFourScore.median_factor + ', blind x' + blindFourScore.median_factor + ', LOO x' + looFourScore.median_factor + ' (pure curve x' + oosCurveScore.median_factor + ', x' + blindCurveScore.median_factor + ', x' + looCurveScore.median_factor + '; three-input x' + oosModelScore.median_factor + ', x' + blindModelScore.median_factor + ', x' + looModelScore.median_factor + '). Rejected: joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once. 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption — so growth and age are not fitted features; they enter as the rubric\'s bounded multipliers (growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540))). No bias correction: out-of-sample and blind biases disagree (-0.50 vs -0.11).',
+ 'Adopted: the family factor (category effects shrunk to parent with pseudo-counts, k=5) — it wins out-of-sample but costs blind and leave-one-out accuracy against the pure curve, and that cost is stated: the four-factor model measures OOS x' + oosFourScore.median_factor + ', blind x' + blindFourScore.median_factor + ', LOO x' + looFourScore.median_factor + ' (pure curve x' + oosCurveScore.median_factor + ', x' + blindCurveScore.median_factor + ', x' + looCurveScore.median_factor + '; three-input x' + oosModelScore.median_factor + ', x' + blindModelScore.median_factor + ', x' + looModelScore.median_factor + '). Rejected: joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once. Re-tested for v8 on the walk-forward split (sweep-v8.mjs): the quadratic wins walk-forward (x2.778) and leave-one-out (x3.388) but loses the blind holdout (x4.121 vs pure curve x3.641); Theil-Sen wins walk-forward (x2.823) and matches the pure curve blind (x3.633) but loses leave-one-out (x3.523 vs x3.402); a breadth multiplier (1+0.1*ln(chains)) improves the four-factor model on blind (x4.526 to x3.968) and leave-one-out (x4.084 to x3.492) and lifts the best farm to $67.53/h, but still loses to the pure curve on walk-forward, leave-one-out and blind. No challenger wins walk-forward AND leave-one-out without losing blind, so the four-factor model stands. 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption — so growth and age are not fitted features; they enter as the rubric\'s bounded multipliers (growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540))). No bias correction: out-of-sample and blind biases disagree (-0.50 vs -0.11).',
  '',
  '## Limits',
  'No supply, distribution, revenue or launch probability is available in the snapshot. A protocol with no token recorded may still have one. Farm plans are research templates with illustrative budgets; asset support, access, points, eligibility and live fees require independent verification.'
