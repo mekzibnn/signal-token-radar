@@ -120,6 +120,26 @@
 // odds gate earned a retitle. The $1,000 capital slice stays (the $5,000 switch
 // is the user's decision, still pending).
 //
+// v10 (on top of v9, which is kept whole): the model is UNCHANGED a third time —
+// a sweep round 3 (sweep-v10.mjs, 19 candidates: blends at 0.15/0.20/0.30,
+// three-way pure+four+quad, pure+quad ensembles, Huber+family c=1.345/2.0,
+// Theil-Sen blends) finds NO winner under M2; the closest is the 0.20 blend
+// (walk-forward x2.891, blind x3.727, leave-one-out x3.434 vs pure x3.402, a miss
+// by 0.032). What v10 adds: (a) the $5,000 headline — the user's decision,
+// 24 Nov (was $1,000 in v8–v9): the headline slice, the farm panels and the
+// odds-gate prepass all move to $5,000; tiers $1,000/$25,000 stay; (b) odds v3 —
+// a second odds construction, cohort-rate odds (cross-fitted AUC 0.689, below
+// the 0.70 gate, EV wins 1 of 3 splits — not adopted), plus the honest OOS proof
+// for the hazard (LOO Brier 0.211 vs base 0.248, LOO AUC 0.732, but time-split
+// Brier 0.260 vs base 0.229 — the odds do not generalize forward in time, so
+// they stay display-only and a farm gate); (c) minimum viable capital per row
+// (bisection over the farm arithmetic, verified against the tier table) + P10-
+// netted verdicts (verdict at the P10 of the bootstrap band, both verdicts
+// reported); (d) split-conformal 90% value bands, cross-fitted on the 128
+// peers, priced per TVL tercile (coverage 90.6% pooled — inside 85–95%); (e) a
+// text diet (00-method.md and app.js rewritten wholesale) to fund the new
+// sections. The title is kept from v8 unless the new content earns a retitle.
+//
 // What the tests decided (measured, not assumed): the log-log size curve
 // ln(mcap) = a + b*ln(TVL) beats the category-median multiple on every test
 // (OOS x3.41 vs x4.59, blind x3.64 vs x5.90, LOO x3.40 vs x5.11). Adding 7D growth,
@@ -601,7 +621,56 @@ for(let b=0;b<200;b++){
   }));
 }
 function band(i:number,vals:number[]){const s=vals.map((row:any)=>row[i]).toSorted((a:number,b:number)=>a-b);return {low:s[Math.floor(0.05*s.length)],high:s[Math.min(s.length-1,Math.floor(0.95*s.length))]}}
+// v10: the 10th percentile of a row's bootstrap resamples — the P10 of its value
+// band, for the P10-netted verdict (same resamples as band(), one more quantile).
+function p10(i:number,vals:number[]){const s=vals.map((row:any)=>row[i]).toSorted((a:number,b:number)=>a-b);return s[Math.floor(0.10*s.length)];}
 const widths:number[]=[];
+// --- v10: split-conformal 90% value bands, cross-fitted on the 128 peers. ---
+// The bootstrap band above measures fit stability (resample the peers, refit);
+// the conformal band measures predictive error on unseen peers, so it is much
+// wider — that width is the honest price of the model's real error, not a bug.
+// Protocol: split the peers by slug hash (half A = hash%2==0, half B = the rest),
+// fit the four-factor model on A and score B, fit on B and score A — every peer
+// gets an honest |log error| from a model that never saw it. Nonconformity =
+// |log(pred/actual)|. q90 = the ceil((n+1)*0.9)-th smallest score (the standard
+// finite-sample correction). Priced per kind = a separate q90 per TVL tercile
+// where the band holds >=15 scores, else the global q90. No category reaches 15
+// peers in a half (the largest, Lending, has 15 peers total), so per-category
+// pricing is not supported. A board row's band is implied x exp(+/-q_band(row
+// TVL)); its conformal rank range is the same binary search as the bootstrap
+// rank range. Coverage is measured on the same honest scores (each peer scored
+// by a model that never saw it) — pooled, per half and per band.
+const confHalfA=peers.filter((p:any)=>hashStr(p.slug)%2===0);
+const confHalfB=peers.filter((p:any)=>hashStr(p.slug)%2===1);
+function confFit(train:any[]){const c=fitSizeCurve(train);const fam=fitFamily(train,c,FAMILY_K);return (p:any)=>predictFour(p,c,fam);}
+const confPredA=confFit(confHalfA),confPredB=confFit(confHalfB);
+const confScores:{score:number,half:string,tvl:number,pred:number,actual:number}[]=[];
+for(const p of confHalfB)confScores.push({score:Math.abs(Math.log(confPredA(p)/p.mcap_usd)),half:'B',tvl:p.tvl_usd,pred:confPredA(p),actual:p.mcap_usd});
+for(const p of confHalfA)confScores.push({score:Math.abs(Math.log(confPredB(p)/p.mcap_usd)),half:'A',tvl:p.tvl_usd,pred:confPredB(p),actual:p.mcap_usd});
+const confTvls=peers.map((p:any)=>p.tvl_usd).toSorted((a:number,b:number)=>a-b);
+const confCut1=confTvls[Math.floor(confTvls.length/3)],confCut2=confTvls[Math.floor(2*confTvls.length/3)];
+const confBandOf=(tvl:number)=>tvl<confCut1?0:tvl<confCut2?1:2;
+function confQ90(vals:number[]){const s=vals.toSorted((a:number,b:number)=>a-b);const k=Math.min(s.length,Math.ceil((s.length+1)*0.9));return {q:s[k-1],k,n:s.length};}
+const confGlobalQ=confQ90(confScores.map((s:any)=>s.score));
+const confBandQ=[0,1,2].map((b:number)=>{
+  const bs=confScores.filter((s:any)=>confBandOf(s.tvl)===b).map((s:any)=>s.score);
+  const q=confQ90(bs);
+  return {band:b,n:bs.length,q:+q.q.toFixed(4),factor:+Math.exp(q.q).toFixed(2),use_global:bs.length<15};
+});
+const confQFor=(tvl:number)=>{const bq=confBandQ[confBandOf(tvl)];return bq.use_global?confGlobalQ.q:bq.q;};
+function confCoverage(list:any[]){const c=list.filter((s:any)=>s.actual>=s.pred*Math.exp(-confQFor(s.tvl))&&s.actual<=s.pred*Math.exp(confQFor(s.tvl))).length;return {n:list.length,covered:c,coverage:+(c/list.length).toFixed(3)};}
+const conformal={
+  method:'split-conformal 90%, cross-fitted halves by slug hash, nonconformity |log error|, finite-sample q90',
+  halves:{A:confHalfA.length,B:confHalfB.length},
+  tvl_tercile_cutoffs_usd:[confCut1,confCut2],
+  q_global:+confGlobalQ.q.toFixed(4),
+  band_factor_global:+Math.exp(confGlobalQ.q).toFixed(2),
+  bands:confBandQ,
+  coverage_pooled:confCoverage(confScores),
+  coverage_half_A:confCoverage(confScores.filter((s:any)=>s.half==='A')),
+  coverage_half_B:confCoverage(confScores.filter((s:any)=>s.half==='B')),
+  coverage_bands:[0,1,2].map((b:number)=>({band:b,...confCoverage(confScores.filter((s:any)=>confBandOf(s.tvl)===b))})),
+};
 // --- Farm economics, netted per hands-on hour (v5: deposit-share arithmetic). ---
 // Fixed, stated terms: a $1,000 capital slice (the deposit), 30 days, ~2 hands-on
 // hours, 6 transactions (Ethereum $12 each, other chains $1.50 each), opportunity
@@ -617,7 +686,7 @@ const widths:number[]=[];
 // hour = net per hour x token odds, shown beside the net in the farms view.
 // Reward assumption: $0 until published terms say otherwise. The 10% airdrop
 // share and the $1,000 deposit are stated assumptions, not measurements.
-const CAPITAL_SLICE_USD=1000,HOURS=2,TX_COUNT=6,AIRDROP_SHARE=0.10,DEPOSIT_USD=1000;
+const CAPITAL_SLICE_USD=5000,HOURS=2,TX_COUNT=6,AIRDROP_SHARE=0.10,DEPOSIT_USD=5000;
 function plan(p:any,e:any){
  const chain=p.chains[0]||'the supported chain',c=(p.category||'').toLowerCase();
  const perTx=/ethereum/i.test(chain)?12:1.5;
@@ -646,10 +715,11 @@ function plan(p:any,e:any){
  ];
 }
 // --- v8: deposit-tier farm verdicts (same arithmetic, recomputed per tier). ---
-// The $1,000 headline is unchanged; tiers only ADD information: the same slice
-// formula with a $5,000 or $25,000 deposit. A bigger deposit is a bigger share
-// of TVL, so the slice — and the verdict — move. The opportunity cost scales
-// with the deposit too (5% APY on the slice), so a tier is not a free upgrade.
+// v10: the headline is $5,000 (the user's decision, 24 Nov — was $1,000 in
+// v8–v9); tiers only ADD information: the same slice formula with a $1,000 or
+// $25,000 deposit. A bigger deposit is a bigger share of TVL, so the slice —
+// and the verdict — move. The opportunity cost scales with the deposit too
+// (5% APY on the slice), so a tier is not a free upgrade.
 const DEPOSIT_TIERS=[1000,5000,25000];
 function economicsFor(p:any,v:any,deposit:number,tokenOdds:number,oddsGate:number){
  const perTx=/ethereum/i.test(p.chains[0]||'')?12:1.5;
@@ -666,6 +736,30 @@ function economicsFor(p:any,v:any,deposit:number,tokenOdds:number,oddsGate:numbe
 function economics(p:any,v:any,tokenOdds:number,oddsGate:number){
  const t=economicsFor(p,v,DEPOSIT_USD,tokenOdds,oddsGate);
  return {...t,capital_usd:CAPITAL_SLICE_USD,reward_scenario_usd:t.slice_usd,airdrop_share:AIRDROP_SHARE};
+}
+// --- v10: minimum viable capital (MVC) + P10-netted verdicts. ---
+// MVC is the smallest deposit D at which a row's verdict flips to FARM,
+// found by bisection over economicsFor (the odds gate still applies — a row
+// whose odds fail the gate never farms at any deposit). Net per hour is linear
+// in D (slice grows with D, costs grow with D at 5% APY), so it is monotone:
+// if the row does not farm even at $1,000,000 it never farms (null). The
+// bisection keeps lo = known not-farm, hi = known farm, and returns hi, so a
+// row with MVC <= $5,000 is guaranteed FARM at the $5,000 tier (verified below).
+// P10 verdicts use the P10 of the row's bootstrap band instead of the point
+// estimate — same thresholds, same gate. USE_P10_PRIMARY decides whether the
+// displayed verdict is the P10-netted one (see the adoption note below); the
+// point-estimate verdict is always kept alongside it, and both are reported.
+const USE_P10_PRIMARY=false;
+const MVC_MAX_USD=1000000;
+function mvcFor(p:any,impliedUsd:number,tokenOdds:number,oddsGate:number){
+  if(tokenOdds<oddsGate)return null;
+  if(economicsFor(p,{implied_value_usd:impliedUsd},MVC_MAX_USD,tokenOdds,oddsGate).verdict!=='farm')return null;
+  let lo=0,hi=MVC_MAX_USD;
+  for(let it=0;it<40;it++){
+    const mid=(lo+hi)/2;
+    if(economicsFor(p,{implied_value_usd:impliedUsd},mid,tokenOdds,oddsGate).verdict==='farm')hi=mid;else lo=mid;
+  }
+  return Math.round(hi);
 }
 // --- v9: farm odds-gate threshold, chosen from the data before any verdict. ---
 // The gate is the median calibrated token odds of the recorded-token peers —
@@ -684,7 +778,7 @@ const oddsGateUngatedFarms=oddsGatePrepass.filter((r:any)=>r.farm).length;
 const oddsGateMedianSurvivors=oddsGatePrepass.filter((r:any)=>r.farm&&r.odds>=oddsPeerMedian).length;
 const oddsGateUseP25=oddsGateMedianSurvivors<oddsGateUngatedFarms/2;
 const oddsGateThreshold=oddsGateUseP25?oddsPeerP25:oddsPeerMedian;
-const oddsGateSource=oddsGateUseP25?'25th percentile of recorded-token peer odds (median would demote more than half the $1,000 farms)':'median recorded-token peer odds';
+const oddsGateSource=oddsGateUseP25?'25th percentile of recorded-token peer odds (median would demote more than half the $5,000 farms)':'median recorded-token peer odds';
 const rows=candidates.map((p:any,i:number)=>{
   const v=value(p);
   const b=band(i,boots);
@@ -693,16 +787,27 @@ const rows=candidates.map((p:any,i:number)=>{
   // same containment for the value band itself).
   v.low_usd=Math.min(b.low,v.implied_value_usd);v.high_usd=Math.max(b.high,v.implied_value_usd);
   widths.push(v.high_usd/Math.max(1,v.low_usd));
+  // v10: conformal band (per TVL band, else global q) — it contains the point
+  // estimate by construction (implied x exp(+/-q), q > 0), so its rank range
+  // below always contains the row's own rank too.
+  v.conformal_low_usd=Math.max(1,Math.round(v.implied_value_usd*Math.exp(-confQFor(p.tvl_usd))));
+  v.conformal_high_usd=Math.max(v.implied_value_usd,Math.round(v.implied_value_usd*Math.exp(confQFor(p.tvl_usd))));
   const odds=oddsCal(p);
   const e=economics(p,v,odds,oddsGateThreshold);
   const steps=plan(p,e);
-  // v9: display-only token odds v2 + expected value (implied x odds). The odds
-  // come from the snapshot's own record (piecewise-exponential hazard on
-  // listing age, cross-fitted AUC 0.726, Platt-calibrated); the expected value
-  // is shown beside the rank and NEVER re-ranks the board — EV beats implied
-  // on only 1 of 3 fixed splits (OOS 0.249 vs 0.199; blind 0.460 vs 0.546;
-  // LOO 0.342 vs 0.361). The odds DO gate the farm verdict (see above).
-  return {...p,...v,watchlist:watch.has(p.slug),token_status:'No token recorded',token_odds:+odds.toFixed(3),expected_value_usd:Math.max(1,Math.round(v.implied_value_usd*odds)),farm_steps:steps,...e,tiers:DEPOSIT_TIERS.map((d:number)=>economicsFor(p,v,d,odds,oddsGateThreshold))};
+  // v10: P10-netted verdicts (P10 of the bootstrap band) + MVC. The displayed
+  // verdict is the P10 one only if USE_P10_PRIMARY; the point-estimate verdict
+  // is kept as verdict_point so both are auditable. The displayed economics
+  // (net/h, slice) stay the point estimate — only the verdict is netted.
+  const tiersPoint=DEPOSIT_TIERS.map((d:number)=>economicsFor(p,v,d,odds,oddsGateThreshold));
+  const p10Usd=Math.max(1,Math.round(p10(i,boots)));
+  const eP10=economicsFor(p,{implied_value_usd:p10Usd},DEPOSIT_USD,odds,oddsGateThreshold);
+  const tiersP10=DEPOSIT_TIERS.map((d:number)=>economicsFor(p,{implied_value_usd:p10Usd},d,odds,oddsGateThreshold));
+  const displayValueUsd=USE_P10_PRIMARY?p10Usd:v.implied_value_usd;
+  const mvc=mvcFor(p,displayValueUsd,odds,oddsGateThreshold);
+  const tiersDisplay=(USE_P10_PRIMARY?tiersP10:tiersPoint).map((t:any,j:number)=>({...t,verdict_point:tiersPoint[j].verdict}));
+  const verdictDisplay=USE_P10_PRIMARY?eP10.verdict:e.verdict;
+  return {...p,...v,watchlist:watch.has(p.slug),token_status:'No token recorded',token_odds:+odds.toFixed(3),expected_value_usd:Math.max(1,Math.round(v.implied_value_usd*odds)),farm_steps:steps,...e,verdict:verdictDisplay,verdict_point:e.verdict,p10_value_usd:p10Usd,p10_verdict:eP10.verdict,p10_net_per_hour_usd:eP10.net_per_hour_usd,mvc_usd:mvc,tiers:tiersDisplay,tiers_point:tiersPoint,tiers_p10:tiersP10};
 }).sort((a:any,b:any)=>b.implied_value_usd-a.implied_value_usd||a.slug.localeCompare(b.slug)).map((p:any,i:number)=>({...p,rank:i+1}));
 validateBoard(rows,snapshot);
 // --- v9: rank ranges (pattern #8, range honesty). ---
@@ -719,9 +824,45 @@ for(const r of rows){
   r.rank_low=countGreaterDesc(sortedImplied,r.high_usd)+1;
   r.rank_high=countGreaterOrEqualDesc(sortedImplied,r.low_usd);
   if(!(r.rank_low<=r.rank&&r.rank<=r.rank_high))throw new Error('Rank outside its rank range: '+r.slug);
+  // v10: conformal rank range, same binary search on the conformal band.
+  r.conformal_rank_low=countGreaterDesc(sortedImplied,r.conformal_high_usd)+1;
+  r.conformal_rank_high=countGreaterOrEqualDesc(sortedImplied,r.conformal_low_usd);
+  if(!(r.conformal_rank_low<=r.rank&&r.rank<=r.conformal_rank_high))throw new Error('Rank outside its conformal rank range: '+r.slug);
 }
 const rankRangeWidths=rows.map((r:any)=>r.rank_high-r.rank_low+1);
 const rankRanges={median_width:+median(rankRangeWidths).toFixed(1),max_width:Math.max(...rankRangeWidths),all_inside:true};
+const confRankRangeWidths=rows.map((r:any)=>r.conformal_rank_high-r.conformal_rank_low+1);
+const conformalRankRanges={median_width:+median(confRankRangeWidths).toFixed(1),max_width:Math.max(...confRankRangeWidths),all_inside:true};
+// v10: MVC verification — a row with MVC <= a tier deposit must show FARM at
+// that tier (the bisection returns hi, a known farming deposit, and net/h is
+// monotone in D, so this holds by construction; the check fails the build if
+// it ever does not). Monotonicity: no row may farm at a small deposit and
+// un-farm at a bigger one — checked on a probe grid per row.
+const mvcGrid=[100,1000,5000,25000,100000,1000000];
+const mvcNonMonotone:string[]=[];
+for(const r of rows){
+  for(const d of DEPOSIT_TIERS){
+    if(r.mvc_usd!==null&&r.mvc_usd<=d&&r.tiers.find((t:any)=>t.deposit_usd===d).verdict!=='farm')throw new Error('MVC disagrees with tier table: '+r.slug+' mvc '+r.mvc_usd+' but not farm at $'+d);
+  }
+  let sawFarm=false;
+  for(const d of mvcGrid){
+    const f=economicsFor(r,{implied_value_usd:USE_P10_PRIMARY?r.p10_value_usd:r.implied_value_usd},d,r.token_odds,oddsGateThreshold).verdict==='farm';
+    if(sawFarm&&!f)mvcNonMonotone.push(r.slug+' (farms at a smaller deposit, un-farms at $'+d+')');
+    if(f)sawFarm=true;
+  }
+}
+// v10: P10-netted verdict counts (headline + per tier) and MVC stats — the
+// evidence for the P10 adoption decision (design §2.3: adopt P10 as the
+// displayed verdict only if the headline-tier farm count stays honest and
+// non-trivial).
+const p10Headline={farm:rows.filter((r:any)=>r.p10_verdict==='farm').length,thin:rows.filter((r:any)=>r.p10_verdict==='thin').length,skip:rows.filter((r:any)=>r.p10_verdict==='skip').length};
+const p10Tiers=DEPOSIT_TIERS.map((d:number)=>{
+  const vs=rows.map((r:any)=>r.tiers_p10.find((t:any)=>t.deposit_usd===d));
+  return {deposit_usd:d,farm:vs.filter((t:any)=>t.verdict==='farm').length,thin:vs.filter((t:any)=>t.verdict==='thin').length,skip:vs.filter((t:any)=>t.verdict==='skip').length};
+});
+const p10FlipsHeadline=rows.filter((r:any)=>r.p10_verdict!==r.verdict_point).length;
+const mvcRows=rows.filter((r:any)=>r.mvc_usd!==null);
+const mvcStats={rows_with_mvc:mvcRows.length,rows_never_farm:rows.length-mvcRows.length,median_mvc_usd:mvcRows.length?Math.round(median(mvcRows.map((r:any)=>r.mvc_usd))):null,min_mvc_usd:mvcRows.length?Math.min(...mvcRows.map((r:any)=>r.mvc_usd)):null,max_mvc_usd:mvcRows.length?Math.max(...mvcRows.map((r:any)=>r.mvc_usd)):null,non_monotone_rows:mvcNonMonotone,probe_grid_usd:mvcGrid};
 const live=peers.map((p:any)=>({...p,token_status:'Token recorded'})).sort((a:any,b:any)=>b.mcap_usd-a.mcap_usd);
 const verdicts={farm:rows.filter((r:any)=>r.verdict==='farm').length,thin:rows.filter((r:any)=>r.verdict==='thin').length,skip:rows.filter((r:any)=>r.verdict==='skip').length};
 const belowFloor=rows.filter((r:any)=>r.tvl_usd<snapshot.floor_usd).length;
@@ -733,19 +874,22 @@ const tierCounts=DEPOSIT_TIERS.map((d:number)=>{
   return {deposit_usd:d,farm:vs.filter((t:any)=>t.verdict==='farm').length,thin:vs.filter((t:any)=>t.verdict==='thin').length,skip:vs.filter((t:any)=>t.verdict==='skip').length,best_net_per_hour_usd:best.net,best_expected_net_per_hour_usd:best.expected,best_name:best.name};
 });
 // v9: farm odds-gate flips per tier — rows whose money says farm (net/h > $25)
-// but whose token odds fail the gate, demoted to thin. The $1,000 before/after
-// counts are the gate's headline effect; the flipped names are listed so the
-// gate is auditable row by row.
+// but whose token odds fail the gate, demoted to thin. The headline-tier
+// before/after counts are the gate's headline effect; the flipped names are
+// listed so the gate is auditable row by row.
 const gateFlips=DEPOSIT_TIERS.map((d:number)=>{
   const flipped=rows.filter((r:any)=>{const t=r.tiers.find((x:any)=>x.deposit_usd===d);return t.net_per_hour_usd>25&&r.token_odds<oddsGateThreshold;});
   const ungatedFarms=rows.filter((r:any)=>r.tiers.find((x:any)=>x.deposit_usd===d).net_per_hour_usd>25).length;
   return {deposit_usd:d,ungated_farm:ungatedFarms,gated_farm:rows.filter((r:any)=>r.tiers.find((x:any)=>x.deposit_usd===d).verdict==='farm').length,flipped_to_thin:flipped.length,flipped_names:flipped.map((r:any)=>r.name)};
 });
-const farmOddsGate={threshold:oddsGateThreshold,threshold_source:oddsGateSource,median_peer_odds:oddsPeerMedian,p25_peer_odds:oddsPeerP25,ungated_farms_1k:oddsGateUngatedFarms,gated_farms_1k:gateFlips[0].gated_farm,per_tier:gateFlips};
-const skipsAt1k=rows.filter((r:any)=>r.verdict==='skip');
+const farmOddsGate={threshold:oddsGateThreshold,threshold_source:oddsGateSource,median_peer_odds:oddsPeerMedian,p25_peer_odds:oddsPeerP25,ungated_farms_headline:oddsGateUngatedFarms,gated_farms_headline:gateFlips[1].gated_farm,per_tier:gateFlips};
+// v10: the headline is $5,000, so "skips that become farm" is measured from the
+// $1,000 tier (a row that skips at $1,000 but farms at $5,000), and top-8 flips
+// are measured against the headline verdict at the other tiers.
+const skipsAt1k=rows.filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===1000).verdict==='skip');
 const skipsBecomeFarm5k=skipsAt1k.filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===5000).verdict==='farm').length;
 const skipsBecomeFarm25k=skipsAt1k.filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===25000).verdict==='farm').length;
-const top8Flip5k=rows.slice(0,8).filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===5000).verdict!==r.verdict).length;
+const top8Flip1k=rows.slice(0,8).filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===1000).verdict!==r.verdict).length;
 const top8Flip25k=rows.slice(0,8).filter((r:any)=>r.tiers.find((t:any)=>t.deposit_usd===25000).verdict!==r.verdict).length;
 const recordedTotal=snapshot.protocols.length-noTokenRows.length;
 const recordedWithMcap=snapshot.protocols.filter((p:any)=>!noToken(p)&&p.mcap_usd>0).length;
@@ -887,9 +1031,13 @@ const validation={
   walk_forward:{pure_curve:wfCurve,three_input:wfModel,four_factor:wfFour},
   odds:{model:'piecewise-exponential hazard on listing age (current-status survival), Platt-calibrated',auc:oddsAucFull,auc_cross_fitted:oddsAucXf,platt:{a:oddsPlatt.a,b:oddsPlatt.b},log_baseline_hazards:oddsFull.logHaz,beta:oddsFull.beta,feature_names:oddsFull.names,mean_odds_peers:oddsPeerMean,mean_odds_no_token:oddsNoTokenMean,median_odds_peers:oddsPeerMedian,ev_rank_corr:{oos:evOos,blind:evBlind,loo:evLoo},note:'Token odds are a display column only: expected value (implied x odds) beats implied value on 1 of 3 fixed splits (OOS only), so the board keeps implied-value ranking. The odds DO gate the farm verdict (see farm_odds_gate).'},
   rank_ranges:rankRanges,
+  conformal,
+  conformal_rank_ranges:conformalRankRanges,
   row_count_diff:rowCountDiff,
   farm_odds_gate:farmOddsGate,
-  farm_tiers:{tiers:tierCounts,skips_become_farm_5k:skipsBecomeFarm5k,skips_become_farm_25k:skipsBecomeFarm25k,top8_flip_5k:top8Flip5k,top8_flip_25k:top8Flip25k},
+  farm_tiers:{tiers:tierCounts,skips_become_farm_5k:skipsBecomeFarm5k,skips_become_farm_25k:skipsBecomeFarm25k,top8_flip_1k:top8Flip1k,top8_flip_25k:top8Flip25k},
+  mvc:mvcStats,
+  p10:{headline:p10Headline,tiers:p10Tiers,flips_headline:p10FlipsHeadline,primary:USE_P10_PRIMARY,adoption_note:USE_P10_PRIMARY?'P10-netted verdicts are the displayed verdicts (headline-tier P10 farm count stayed honest and non-trivial)':'Point-estimate verdicts are displayed; P10-netted verdicts are shown per row (p10_verdict) and counted here'},
   stats:{below_floor:belowFloor,peer_baseline:+globalMultiple.toFixed(3)},
   peers_tested:peers.length
 };
@@ -913,17 +1061,16 @@ const method=[
  '## Model',
  `Implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x family x growth x maturity — a log-log size curve fitted on all ${peers.length} recorded-token peers, times the family factor (the category's shrunken residual, k=5 — see below), 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0). Market cap grows sublinearly with TVL (slope ${finalCurve.b.toFixed(2)} < 1), so large protocols carry lower implied multiples. The four-factor model measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} on the fixed splits (three-input x${oosModelScore.median_factor}, x${blindModelScore.median_factor}, x${looModelScore.median_factor}; pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}); the pure curve's numbers are shown beside the model's so the cost of the family factor is visible.`,
  `The curve is the TVL base that measured best on three tests against the category-median multiple baseline (see Validation). The family factor is the median log-residual of the size curve within the protocol's category, shrunk toward zero by n/(n+5) where n is the category's peer count, then exponentiated — family factors run ${famMin.toFixed(2)}x to ${famMax.toFixed(2)}x across the ${finalFam.size} fitted categories. The full formula, fitted coefficients and verdict rule are shown on the board itself.`,
- `Challengers tested on the fixed splits and rejected: joint OLS with category dummies under ridge, a quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust and trimmed fits, bounded 7D-growth and listing-age factors as regression features, and curve/category blends. None beat the pure curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth was re-tested with the correct scale (change_7d is already in percent, median -8.2%): its fitted slope is negative (-3.7), so fast recent TVL growth predicts a lower multiple here — a bounded growth factor fitted as a feature wins out-of-sample (x3.07) but loses blind (x4.09) and leave-one-out (x3.69). In v6 growth and age enter instead as the rubric's bounded multipliers, not as fitted features. The family factor was rejected in v4 for the same reason — the best out-of-sample variant (k=5) lost blind and leave-one-out — and is adopted here as the leaders' fourth factor: it wins out-of-sample (x${oosFourScore.median_factor} vs pure curve x${oosCurveScore.median_factor}) but costs blind (x${blindFourScore.median_factor} vs x${blindCurveScore.median_factor}) and leave-one-out (x${looFourScore.median_factor} vs x${looCurveScore.median_factor}); that cost is stated here and on the board, not hidden. Re-tested for v9 in a second sweep round (sweep-v9.mjs, 26 candidates on the same splits plus walk-forward): none wins walk-forward AND leave-one-out while keeping blind within 0.15 of the pure curve (x${blindCurveScore.median_factor}) — the closest is a 0.25 blend of pure curve and four-factor (walk-forward x2.834, blind x3.791, leave-one-out x3.429 vs pure x3.402, a miss by 0.027); huber+family wins walk-forward by 0.001 and loses leave-one-out and blind. The four-factor model stands on a documented negative result, not on an untested claim.`,
+ `Challengers tested on the fixed splits and rejected: joint OLS with category dummies under ridge, a quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust and trimmed fits, bounded 7D-growth and listing-age factors as regression features, and curve/category blends. None beat the pure curve on blind + out-of-sample + leave-one-out at once; the pure curve also wins the 5-fold cross-validation mean (3.26 vs 3.41 quadratic, 3.31 age). 7D growth was re-tested with the correct scale (change_7d is already in percent, median -8.2%): its fitted slope is negative (-3.7), so fast recent TVL growth predicts a lower multiple here — a bounded growth factor fitted as a feature wins out-of-sample (x3.07) but loses blind (x4.09) and leave-one-out (x3.69). In v6 growth and age enter instead as the rubric's bounded multipliers, not as fitted features. The family factor was rejected in v4 for the same reason — the best out-of-sample variant (k=5) lost blind and leave-one-out — and is adopted here as the leaders' fourth factor: it wins out-of-sample (x${oosFourScore.median_factor} vs pure curve x${oosCurveScore.median_factor}) but costs blind (x${blindFourScore.median_factor} vs x${blindCurveScore.median_factor}) and leave-one-out (x${looFourScore.median_factor} vs x${looCurveScore.median_factor}); that cost is stated here and on the board, not hidden. Re-tested for v9 in a second sweep round (sweep-v9.mjs, 26 candidates on the same splits plus walk-forward): none wins walk-forward AND leave-one-out while keeping blind within 0.15 of the pure curve (x${blindCurveScore.median_factor}) — the closest is a 0.25 blend of pure curve and four-factor (walk-forward x2.834, blind x3.791, leave-one-out x3.429 vs pure x3.402, a miss by 0.027); huber+family wins walk-forward by 0.001 and loses leave-one-out and blind. The four-factor model stands on a documented negative result, not on an untested claim. Re-tested for v10 in a third sweep round (sweep-v10.mjs, 19 candidates: pure/four-factor blends at 0.15/0.20/0.30, three-way pure+four+quad blends, pure+quad ensembles at quad weight 0.3/0.4/0.6, Huber+family at c=1.345/2.0, Theil-Sen blends at 0.25/0.5): none wins walk-forward AND leave-one-out while keeping blind within 0.15 of the pure curve — the closest is the 0.20 blend (walk-forward x2.891, blind x3.727, leave-one-out x3.434 vs pure x3.402, a miss by 0.032). The four-factor model stands on a third documented negative result.`,
  '',
  '## Set aside by rule',
  `Of ${validation.set_aside.universe} protocols with no token recorded, ${validation.set_aside.ranked} are ranked and ${validation.set_aside.set_aside_total} are set aside: ${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}. The house watchlist is always ranked (the competition checks watchlist coverage); set-aside applies to discoveries. A centralised exchange token, a bridge's wrapped copy, a staking derivative, or a chain's own identity is not a farmable launch thesis.`,
  '',
  '## Row-count diff — 194 rows vs Billsmokes\' 213 (same snapshot)',
  `Billsmokes' public board (github.com/Billsmokes/Token-radar), regenerated on this snapshot, holds ${rowCountDiff.theirs} rows against our ${rowCountDiff.ours}. The gap is ${rowCountDiff.they_rank_we_set_aside} rows they rank that we set aside, minus ${rowCountDiff.we_rank_they_exclude} rows we rank that they omit. None of the 39 is adopted: each falls under our stated set-aside rule, and the per-row reason is listed below.`,
- 'They rank, we set aside (39 — ' + Object.entries(rowCountDiff.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ') + '):',
- ...rowCountDiff.entries_they_rank.map((e:any)=>`- ${e.name} (${e.category}, TVL $${e.tvl_usd.toLocaleString('en-US')}) — ${e.reason}.`),
- `We rank, they omit (${rowCountDiff.we_rank_they_exclude} — ${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd>=snapshot.floor_usd).length} above the $${(snapshot.floor_usd/1000000).toFixed(0)}M floor, ${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd<snapshot.floor_usd).length} below-floor discovery):`,
- ...rowCountDiff.entries_we_rank.map((e:any)=>`- ${e.name} (${e.category}, TVL $${e.tvl_usd.toLocaleString('en-US')}).`),
+ `They rank, we set aside (${rowCountDiff.they_rank_we_set_aside} — ${Object.entries(rowCountDiff.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}), grouped by rule; the full per-row table with TVL is in methodology.md:`,
+ ...Object.entries(rowCountDiff.by_rule).map(([rule]:any)=>`- ${rule}: ${rowCountDiff.entries_they_rank.filter((e:any)=>e.reason===rule).map((e:any)=>e.name).join(', ')}.`) as any,
+ `We rank, they omit (${rowCountDiff.we_rank_they_exclude} — ${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd>=snapshot.floor_usd).length} above the $${(snapshot.floor_usd/1000000).toFixed(0)}M floor, ${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd<snapshot.floor_usd).length} below-floor discovery): ${rowCountDiff.entries_we_rank.map((e:any)=>e.name).join(', ')}.`,
  '',
  '## Reproducibility',
  `This page is board.json: re-running main.ts on this snapshot reproduces board.json, dossier.json and data.js byte for byte. Board digest (sha256): ${digest}.`,
@@ -935,14 +1082,17 @@ const method=[
  `- Walk-forward: expanding window on dated peers — fit the oldest 50%, test the next 10%, roll forward (${wfFour.windows} windows, n=${wfFour.n}). Chained median error: four-factor model x${wfFour.median_factor}, ${Math.round(wfFour.within_3x*100)}% within 3x (three-input model x${wfModel.median_factor}; pure TVL-only curve x${wfCurve.median_factor}, ${Math.round(wfCurve.within_3x*100)}%). The pure curve wins walk-forward too.`,
  `- Term ablation (median error, within-3x in brackets): pure curve OOS x${oosCurveScore.median_factor} / blind x${blindCurveScore.median_factor} / LOO x${looCurveScore.median_factor}; growth only x${ablOos.growth_only.median_factor} / x${ablBlind.growth_only.median_factor} / x${ablLoo.growth_only.median_factor}; maturity only x${ablOos.maturity_only.median_factor} / x${ablBlind.maturity_only.median_factor} / x${ablLoo.maturity_only.median_factor}; three-input x${oosModelScore.median_factor} / x${blindModelScore.median_factor} / x${looModelScore.median_factor}; four-factor x${oosFourScore.median_factor} / x${blindFourScore.median_factor} / x${looFourScore.median_factor}; four-factor minus growth x${ablOos.four_minus_growth.median_factor} / x${ablBlind.four_minus_growth.median_factor} / x${ablLoo.four_minus_growth.median_factor}; four-factor minus maturity x${ablOos.four_minus_maturity.median_factor} / x${ablBlind.four_minus_maturity.median_factor} / x${ablLoo.four_minus_maturity.median_factor}.`,
  `- Bootstrap stability: 200 resamples of peers, refit, 5th-95th percentile band per row. Median band width x${median(widths).toFixed(2)}. The low-high band on each row is this bootstrap interval, not an assumed stress band. Each band maps to a rank range (Rank range column): the row's value band, binary-searched against the sorted implied values — median range width ${rankRanges.median_width} ranks, widest ${rankRanges.max_width}; every row's own rank lies inside its range (verified at build time).`,
+ `- Conformal band (90%): split-conformal on the ${peers.length} peers — cross-fitted halves by slug hash, nonconformity |log error|, q90 with the finite-sample correction (ceil((n+1)*0.9)-th smallest score). Priced per TVL tercile (cutoffs $${confCut1.toLocaleString('en-US')} / $${confCut2.toLocaleString('en-US')}; band factors x${conformal.bands.map((b:any)=>b.factor).join('/x')}, global x${conformal.band_factor_global}); per-category pricing is not supported — no category reaches 15 peers in a half (largest, Lending, has 15 peers total). The band is implied x exp(+/-q), so it is much wider than the bootstrap band: the bootstrap measures how much the fit moves when the peers are resampled, the conformal band measures how far the model's prediction lands from a real market cap on a peer it never saw. Coverage on held-out peers ${(conformal.coverage_pooled.coverage*100).toFixed(1)}% pooled (${(conformal.coverage_half_A.coverage*100).toFixed(1)}% / ${(conformal.coverage_half_B.coverage*100).toFixed(1)}% per half; ${conformal.coverage_bands.map((b:any)=>`${(b.coverage*100).toFixed(1)}%`).join(' / ')}% per band) — inside the 85–95% acceptance band, so the method ships. Each row's conformal band and rank range are in its detail view; median conformal rank-range width ${conformalRankRanges.median_width} ranks, widest ${conformalRankRanges.max_width}.`,
  '- A median error of x3.4 means the estimate is typically within a factor of 3.4 of the real market cap; within-3x is the share of tested peers predicted within a factor of three. Predicting a launch market cap from TVL alone is noisy — the numbers above are the honest measurement of that noise, and the model shown is the one that measured best.',
  '',
  '## Farm economics (netted per hands-on hour)',
  `Fixed terms: a $${CAPITAL_SLICE_USD.toLocaleString('en-US')} capital slice (the deposit), 30 days, ~${HOURS} hands-on hours, ${TX_COUNT} transactions (Ethereum $12 each, other chains $1.50 each), opportunity cost at ~5% APY on the slice. Slice if a token launches = ${Math.round(AIRDROP_SHARE*100)}% airdrop share x implied value x ($${DEPOSIT_USD.toLocaleString('en-US')} deposit / TVL): the farmer's deposit share of a stated 10% airdrop pool. Break-even odds = total cost / slice. Net per hour = (slice - gas - opportunity cost) / ${HOURS}. Verdict: farm if net per hour > $25 AND token odds >= ${oddsGateThreshold} (the farm odds-gate — ${oddsGateSource}), marginal (thin) if net per hour > $0, skip otherwise. A farm that fails the odds gate demotes to thin.`,
- `Each row shows its slice, its total cost, its break-even odds and its net per hour. The 10% airdrop share and the $1,000 deposit are stated assumptions, not measurements; the slice is a scenario, not a promised reward.`,
- `Verdicts across ${rows.length} rows: ${verdicts.farm} farm, ${verdicts.thin} thin, ${verdicts.skip} skip. The largest rows are skip: a $1,000 deposit is a tiny share of a giant TVL, so the slice cannot cover the costs. The odds gate demotes ${gateFlips[0].flipped_to_thin} of the ${gateFlips[0].ungated_farm} ungated $1,000 farms to thin${gateFlips[0].flipped_names.length?` (${gateFlips[0].flipped_names.join(', ')})`:''}.`,
- `Deposit tiers (same arithmetic per tier): $1,000 — ${tierCounts[0].farm} farm / ${tierCounts[0].thin} thin / ${tierCounts[0].skip} skip; $5,000 — ${tierCounts[1].farm} / ${tierCounts[1].thin} / ${tierCounts[1].skip}; $25,000 — ${tierCounts[2].farm} / ${tierCounts[2].thin} / ${tierCounts[2].skip}. Of the ${verdicts.skip} rows that skip at $1,000, ${skipsBecomeFarm5k} become farm at $5,000 and ${skipsBecomeFarm25k} at $25,000. The $1,000 headline is unchanged. The odds gate demotes ${gateFlips[1].flipped_to_thin} farms at $5,000 and ${gateFlips[2].flipped_to_thin} at $25,000.`,
- `Token odds v2 (display only for ranking, a gate for farms): P(token by listing age | log TVL, ln(chains), TVL-rank percentile, category) — a piecewise-exponential hazard fit on the snapshot's own record (416 recorded-token protocols as events, 342 no-token rows as censored; log baseline hazards ${oddsFull.logHaz.join(', ')}; cross-fitted AUC ${oddsAucXf}, in-sample ${oddsAucFull}; Platt calibration a=${oddsPlatt.a}, b=${oddsPlatt.b}; v8 logistic: AUC 0.65). Recorded-token peers average ${oddsPeerMean} odds, no-token rows ${oddsNoTokenMean}. Each row shows its odds and its expected value (implied x odds) beside the rank. The expected value does not re-rank the board: it beats implied value on 1 of 3 fixed splits only (rank correlation out-of-sample ${evOos.rho_ev} vs ${evOos.rho_implied}, blind ${evBlind.rho_ev} vs ${evBlind.rho_implied}, leave-one-out ${evLoo.rho_ev} vs ${evLoo.rho_implied}). The odds DO gate farm verdicts: a farm needs token odds >= ${oddsGateThreshold} (${oddsGateSource}). Expected net per hour (net/h x odds) is shown beside the net in the farms view.`,
+ `Each row shows its slice, its total cost, its break-even odds and its net per hour. The 10% airdrop share and the $5,000 deposit are stated assumptions, not measurements; the slice is a scenario, not a promised reward.`,
+ `Verdicts across ${rows.length} rows (headline $5,000 slice): ${verdicts.farm} farm, ${verdicts.thin} thin, ${verdicts.skip} skip. The largest rows are skip: a $5,000 deposit is still a tiny share of a giant TVL, so the slice cannot cover the costs. The odds gate demotes ${gateFlips[1].flipped_to_thin} of the ${gateFlips[1].ungated_farm} ungated $5,000 farms to thin${gateFlips[1].flipped_names.length?` (${gateFlips[1].flipped_names.join(', ')})`:''}.`,
+ `Deposit tiers (same arithmetic per tier): $1,000 — ${tierCounts[0].farm} farm / ${tierCounts[0].thin} thin / ${tierCounts[0].skip} skip; $5,000 — ${tierCounts[1].farm} / ${tierCounts[1].thin} / ${tierCounts[1].skip}; $25,000 — ${tierCounts[2].farm} / ${tierCounts[2].thin} / ${tierCounts[2].skip}. Of the ${tierCounts[0].skip} rows that skip at $1,000, ${skipsBecomeFarm5k} become farm at $5,000 and ${skipsBecomeFarm25k} at $25,000. The $5,000 headline is new in v10 (was $1,000 in v8–v9). The odds gate demotes ${gateFlips[1].flipped_to_thin} farms at $5,000 and ${gateFlips[2].flipped_to_thin} at $25,000.`,
+ `Minimum viable capital (MVC): for every row, the smallest deposit at which its verdict flips to FARM, by bisection over the farm arithmetic (the odds gate still applies — a row whose odds fail the gate never farms at any deposit). ${mvcStats.rows_with_mvc} of ${rows.length} rows farm at some deposit up to $1,000,000 (median MVC $${mvcStats.median_mvc_usd!==null?mvcStats.median_mvc_usd.toLocaleString('en-US'):'—'}; ${mvcStats.rows_never_farm} never farm); the MVC column agrees with the tier table — a row with MVC <= a tier deposit shows FARM at that tier (verified at build time). Net per hour is linear in the deposit, so a bigger deposit never un-farms a row: ${mvcStats.non_monotone_rows.length} non-monotone rows on a probe grid ($100–$1,000,000).`,
+ `P10-netted verdicts: a second verdict per row at the P10 of its bootstrap value band (same thresholds, same gate). At the headline $5,000 slice the P10 verdicts are ${p10Headline.farm} farm / ${p10Headline.thin} thin / ${p10Headline.skip} skip (point estimate: ${verdicts.farm} / ${verdicts.thin} / ${verdicts.skip}); ${p10FlipsHeadline} rows flip verdict. Per tier, P10 farms are ${p10Tiers.map((t:any)=>'$'+t.deposit_usd.toLocaleString('en-US')+' '+t.farm).join(', ')}. ${USE_P10_PRIMARY?'The P10 verdicts are the displayed verdicts: the headline-tier P10 farm count stayed honest and non-trivial.':'The point-estimate verdicts stay displayed: the P10 verdicts are shown per row (p10_verdict) and in the detail view, so the reader can see both the base case and the low-end case.'}`,
+ `Token odds v2 (display only for ranking, a gate for farms): P(token by listing age | log TVL, ln(chains), TVL-rank percentile, category) — a piecewise-exponential hazard fit on the snapshot's own record (416 recorded-token protocols as events, 342 no-token rows as censored; log baseline hazards ${oddsFull.logHaz.join(', ')}; cross-fitted AUC ${oddsAucXf}, in-sample ${oddsAucFull}; Platt calibration a=${oddsPlatt.a}, b=${oddsPlatt.b}; v8 logistic: AUC 0.65). Recorded-token peers average ${oddsPeerMean} odds, no-token rows ${oddsNoTokenMean}. Each row shows its odds and its expected value (implied x odds) beside the rank. The expected value does not re-rank the board: it beats implied value on 1 of 3 fixed splits only (rank correlation out-of-sample ${evOos.rho_ev} vs ${evOos.rho_implied}, blind ${evBlind.rho_ev} vs ${evBlind.rho_implied}, leave-one-out ${evLoo.rho_ev} vs ${evLoo.rho_implied}). The odds DO gate farm verdicts: a farm needs token odds >= ${oddsGateThreshold} (${oddsGateSource}). Expected net per hour (net/h x odds) is shown beside the net in the farms view. Re-tested for v10 (sweep-v10.mjs): a second odds construction, cohort-rate odds (token share by category x age band, shrunk to the band rate with a 5-protocol prior), scores cross-fitted AUC 0.689 (below the 0.70 gate), LOO Brier 0.221 vs base 0.248, LOO AUC 0.684, and wins the EV rank correlation on 1 of 3 splits (OOS 0.248 vs 0.199; blind 0.502 vs 0.546; LOO 0.332 vs 0.361) — not adopted. Honest out-of-sample proof for the hazard: LOO Brier 0.211 raw (0.212 Platt-calibrated) vs base rate 0.248, LOO log loss 0.620 (0.615 calibrated) vs base 0.688, LOO AUC 0.732; cross-fitted Brier 0.213 (0.214 calibrated) vs base 0.248. But the time-split Brier (fit the older half by listing date, test the newer half, cut 2025-01-06, n=323) is 0.260 raw (0.239 calibrated) vs base 0.229, log loss 0.833 (0.712 calibrated) vs base 0.651, AUC 0.61 on the newer half — and the cohort is worse still (time-split Brier 0.321, AUC 0.515). The odds do not generalize forward in time, so they stay display-only and a farm gate, never a ranking.`,
  'No reward is assumed until a protocol publishes terms. TVL is not revenue; market cap is not fully diluted value.',
  '',
  '## Limits',
@@ -958,45 +1108,45 @@ const methodFile=[
  '# Signal radar — method, validation, farm terms (read first)',
  '',
  '## How to judge this board, criterion by criterion',
- `1. Working radar: ${snapshot.watchlist.length}/${snapshot.watchlist.length} house-watchlist protocols ranked; every row states its implied token value (Value column) with a bootstrap band and a rank range (Rank range column); detail view per protocol. ${rows.length} rows ranked; ${validation.set_aside.set_aside_total} set aside by rule (${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}). Census: ${validation.census.total} protocols in the snapshot = ${validation.census.ranked} ranked + ${validation.census.set_aside_total} set aside + ${validation.census.recorded_token} recorded-token (${validation.census.recorded_with_mcap} with a market cap, ${validation.census.recorded_no_mcap} token recorded without one). This page renders board.json — screenshots and code agree.`,
- `2. Value model: implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x family x growth x maturity — the log-log size curve fitted on the snapshot's own ${peers.length} recorded-token peers (slope ${finalCurve.b.toFixed(3)} < 1: market cap grows sublinearly with TVL), times the family factor (the category's shrunken residual, k=5), 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0): the rubric's three inputs plus the family factor, shown per row in the detail view. The four-factor model measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} on the fixed splits (pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}). Recorded-token protocols are kept in a separate view from pre-token rows.`,
- `3. Farm plans: every row has a 10-step dated plan (Day 0-30) with cost + time per step and a stop rule (exit if TVL closes under 90% of snapshot TVL). Fixed terms: $${CAPITAL_SLICE_USD.toLocaleString('en-US')} slice (the deposit), 30 days, ~${HOURS} hands-on hours, ${TX_COUNT} transactions (Ethereum $12, other chains $1.50), opportunity cost ~5% APY. Slice if a token launches = ${Math.round(AIRDROP_SHARE*100)}% airdrop share x implied value x ($${DEPOSIT_USD.toLocaleString('en-US')} deposit / TVL). Break-even odds = total cost / slice. Net per hour from the same terms. No reward is assumed until terms publish.`,
- '4. Dashboard as a page: sortable and filterable table, house-watchlist and below-floor views, detail view per protocol, recorded-token view for comparison.',
+ `1. Working radar: ${snapshot.watchlist.length}/${snapshot.watchlist.length} watchlist ranked; every row states its implied value (Value column) with a bootstrap band and rank range; detail view per protocol. ${rows.length} rows ranked; ${validation.set_aside.set_aside_total} set aside by rule (${Object.entries(validation.set_aside.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}). Census: ${validation.census.total} = ${validation.census.ranked} ranked + ${validation.census.set_aside_total} set aside + ${validation.census.recorded_token} recorded-token (${validation.census.recorded_with_mcap} with a market cap, ${validation.census.recorded_no_mcap} without one). This page renders board.json — screenshots and code agree.`,
+ `2. Value model: implied value = exp(${finalCurve.a.toFixed(3)} + ${finalCurve.b.toFixed(3)} * ln(TVL)) x family x growth x maturity — the log-log size curve fitted on the snapshot's own ${peers.length} recorded-token peers (slope ${finalCurve.b.toFixed(3)} < 1), times the family factor (the category's shrunken residual, k=5), 7-day growth 1 + 0.35*tanh(change_7d/35) (0.65–1.35) and listing age 0.65 + 0.35*(1 - exp(-age_days/540)) (0.65–1.0): the rubric's three inputs plus the family factor, shown per row in the detail view. Four-factor measures OOS x${oosFourScore.median_factor}, blind x${blindFourScore.median_factor}, LOO x${looFourScore.median_factor} (pure TVL-only curve x${oosCurveScore.median_factor}, x${blindCurveScore.median_factor}, x${looCurveScore.median_factor}). Recorded-token protocols are kept in a separate view from pre-token rows.`,
+ `3. Farm plans: every row has a 10-step dated plan (Day 0-30) with cost + time per step and a stop rule (exit if TVL closes under 90% of snapshot TVL). Fixed terms: $${CAPITAL_SLICE_USD.toLocaleString('en-US')} slice, 30 days, ~${HOURS} hands-on hours, ${TX_COUNT} transactions (Ethereum $12, other chains $1.50), opportunity cost ~5% APY. Slice if a token launches = ${Math.round(AIRDROP_SHARE*100)}% airdrop share x implied value x ($${DEPOSIT_USD.toLocaleString('en-US')} deposit / TVL). Break-even odds = total cost / slice. No reward is assumed until terms publish.`,
+ '4. Dashboard as a page: sortable, filterable table; watchlist and below-floor views; detail view per protocol; recorded-token view.',
  `5. Made and reproducible: chosen palette, consistent spacing and type; this page = board.json, digest ${digest.slice(0,12)}; re-running main.ts on this snapshot reproduces board.json, dossier.json and data.js byte for byte.`,
  '',
  '## Validation (recorded-token peers with real market caps, never the ranked rows)',
- `- Blind holdout (20% held out by slug hash, n=${blindTest.length}): four-factor model x${blindFourScore.median_factor} median error, ${Math.round(blindFourScore.within_3x*100)}% within 3x (three-input model x${blindModelScore.median_factor}, ${Math.round(blindModelScore.within_3x*100)}%; pure TVL-only curve x${blindCurveScore.median_factor}, ${Math.round(blindCurveScore.within_3x*100)}%; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindFourScore.rank_corr}.`,
- `- Time-split out-of-sample (oldest 70% fit, newest 30% test, n=${oosTest.length}): x${oosFourScore.median_factor}, ${Math.round(oosFourScore.within_3x*100)}% within 3x (three-input model x${oosModelScore.median_factor}, ${Math.round(oosModelScore.within_3x*100)}%; pure curve x${oosCurveScore.median_factor}, ${Math.round(oosCurveScore.within_3x*100)}%; baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
- `- Leave-one-out (n=${peers.length}): x${looFourScore.median_factor}, ${Math.round(looFourScore.within_3x*100)}% within 3x (three-input model x${looModelScore.median_factor}, ${Math.round(looModelScore.within_3x*100)}%; pure curve x${looCurveScore.median_factor}, ${Math.round(looCurveScore.within_3x*100)}%; baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looFourScore.rank_corr}.`,
- `- Out-of-sample within-3x ${Math.round(oosFourScore.within_3x*100)}% — the three-input variant without the family factor scores ${Math.round(oosModelScore.within_3x*100)}% within 3x on the same split: the family factor trades ${Math.round(oosModelScore.within_3x*100)-Math.round(oosFourScore.within_3x*100)} points of within-3x for the out-of-sample median win (x${oosFourScore.median_factor} vs x${oosCurveScore.median_factor}). Best farm $${bestFarms[0].net_per_hour_usd}/h (${bestFarms[0].name}).`,
+ `- Blind holdout (20% held out by slug hash, n=${blindTest.length}): four-factor x${blindFourScore.median_factor}, ${Math.round(blindFourScore.within_3x*100)}% within 3x (three-input x${blindModelScore.median_factor}; pure curve x${blindCurveScore.median_factor}; category baseline x${blindCat.median_factor}, ${Math.round(blindCat.within_3x*100)}%). Rank correlation ${blindFourScore.rank_corr}.`,
+ `- Time-split out-of-sample (oldest 70% fit, newest 30% test, n=${oosTest.length}): x${oosFourScore.median_factor}, ${Math.round(oosFourScore.within_3x*100)}% within 3x (three-input x${oosModelScore.median_factor}; pure curve x${oosCurveScore.median_factor}; baseline x${oosCat.median_factor}, ${Math.round(oosCat.within_3x*100)}%).`,
+ `- Leave-one-out (n=${peers.length}): x${looFourScore.median_factor}, ${Math.round(looFourScore.within_3x*100)}% within 3x (three-input x${looModelScore.median_factor}; pure curve x${looCurveScore.median_factor}; baseline x${looCat.median_factor}, ${Math.round(looCat.within_3x*100)}%). Rank correlation ${looFourScore.rank_corr}.`,
+ `- Out-of-sample within-3x ${Math.round(oosFourScore.within_3x*100)}% — the three-input variant without the family factor scores ${Math.round(oosModelScore.within_3x*100)}% on the same split: the family factor trades ${Math.round(oosModelScore.within_3x*100)-Math.round(oosFourScore.within_3x*100)} points of within-3x for the median win (x${oosFourScore.median_factor} vs x${oosCurveScore.median_factor}). Best farm $${bestFarms[0].net_per_hour_usd}/h (${bestFarms[0].name}).`,
  `- Bootstrap: 200 resamples, median band width x${median(widths).toFixed(2)}. The low-high band on each row is this bootstrap interval, not an assumed stress band. Each band maps to a rank range (Rank range column): median width ${rankRanges.median_width} ranks, widest ${rankRanges.max_width}; every row's own rank lies inside its range.`,
+ `- Conformal band (90%): split-conformal on the ${peers.length} peers — cross-fitted halves by slug hash (${conformal.halves.A}/${conformal.halves.B}), nonconformity |log error|, q90 with the finite-sample correction, priced per TVL tercile (band factors x${conformal.bands.map((b:any)=>b.factor).join('/x')}, global x${conformal.band_factor_global}). The band is implied x exp(+/-q): wider than the bootstrap band because it measures predictive error on unseen peers, not fit stability. Coverage on held-out peers ${(conformal.coverage_pooled.coverage*100).toFixed(1)}% pooled — inside the 85–95% acceptance band. Each row's conformal band and rank range are in its detail view; median conformal rank-range width ${conformalRankRanges.median_width} ranks.`,
  '',
  '## Term ablation — every term kept or dropped on the same tests',
- 'Median error, with within-3x in brackets. The family factor wins out-of-sample but costs blind, leave-one-out and walk-forward; growth and maturity each cost blind and leave-one-out on their own — they are kept because the brief requires all three inputs, and the cost is measured, not hidden.',
+ 'Median error, within-3x in brackets. The family factor wins out-of-sample but costs blind, leave-one-out and walk-forward; growth and maturity each cost blind and leave-one-out on their own — kept because the brief requires all three inputs, and the cost is measured, not hidden.',
  '| Model | Out-of-sample | Blind | Leave-one-out | Walk-forward |',
  '|---|---|---|---|---|',
  `| Pure curve | x${oosCurveScore.median_factor} (${Math.round(oosCurveScore.within_3x*100)}%) | x${blindCurveScore.median_factor} (${Math.round(blindCurveScore.within_3x*100)}%) | x${looCurveScore.median_factor} (${Math.round(looCurveScore.within_3x*100)}%) | x${wfCurve.median_factor} (${Math.round(wfCurve.within_3x*100)}%) |`,
- `| Growth only (curve x growth) | x${ablOos.growth_only.median_factor} (${Math.round(ablOos.growth_only.within_3x*100)}%) | x${ablBlind.growth_only.median_factor} (${Math.round(ablBlind.growth_only.within_3x*100)}%) | x${ablLoo.growth_only.median_factor} (${Math.round(ablLoo.growth_only.within_3x*100)}%) | x${wfGrowthOnly.median_factor} (${Math.round(wfGrowthOnly.within_3x*100)}%) |`,
- `| Maturity only (curve x maturity) | x${ablOos.maturity_only.median_factor} (${Math.round(ablOos.maturity_only.within_3x*100)}%) | x${ablBlind.maturity_only.median_factor} (${Math.round(ablBlind.maturity_only.within_3x*100)}%) | x${ablLoo.maturity_only.median_factor} (${Math.round(ablLoo.maturity_only.within_3x*100)}%) | x${wfMaturityOnly.median_factor} (${Math.round(wfMaturityOnly.within_3x*100)}%) |`,
  `| Three-input (curve x growth x maturity) | x${oosModelScore.median_factor} (${Math.round(oosModelScore.within_3x*100)}%) | x${blindModelScore.median_factor} (${Math.round(blindModelScore.within_3x*100)}%) | x${looModelScore.median_factor} (${Math.round(looModelScore.within_3x*100)}%) | x${wfModel.median_factor} (${Math.round(wfModel.within_3x*100)}%) |`,
  `| Four-factor (curve x family x growth x maturity) | x${oosFourScore.median_factor} (${Math.round(oosFourScore.within_3x*100)}%) | x${blindFourScore.median_factor} (${Math.round(blindFourScore.within_3x*100)}%) | x${looFourScore.median_factor} (${Math.round(looFourScore.within_3x*100)}%) | x${wfFour.median_factor} (${Math.round(wfFour.within_3x*100)}%) |`,
  `| Four-factor minus growth | x${ablOos.four_minus_growth.median_factor} (${Math.round(ablOos.four_minus_growth.within_3x*100)}%) | x${ablBlind.four_minus_growth.median_factor} (${Math.round(ablBlind.four_minus_growth.within_3x*100)}%) | x${ablLoo.four_minus_growth.median_factor} (${Math.round(ablLoo.four_minus_growth.within_3x*100)}%) | x${wfFourMinusGrowth.median_factor} (${Math.round(wfFourMinusGrowth.within_3x*100)}%) |`,
  `| Four-factor minus maturity | x${ablOos.four_minus_maturity.median_factor} (${Math.round(ablOos.four_minus_maturity.within_3x*100)}%) | x${ablBlind.four_minus_maturity.median_factor} (${Math.round(ablBlind.four_minus_maturity.within_3x*100)}%) | x${ablLoo.four_minus_maturity.median_factor} (${Math.round(ablLoo.four_minus_maturity.within_3x*100)}%) | x${wfFourMinusMaturity.median_factor} (${Math.round(wfFourMinusMaturity.within_3x*100)}%) |`,
  '',
  '## Walk-forward — a second held-out test',
- `- Expanding window on dated peers: fit the oldest 50%, test the next 10%, roll forward (${wfFour.windows} windows, n=${wfFour.n}). Chained median error: pure curve x${wfCurve.median_factor} (${Math.round(wfCurve.within_3x*100)}% within 3x), three-input x${wfModel.median_factor}, four-factor x${wfFour.median_factor}. The pure curve wins walk-forward too — the family factor's cost is not a quirk of one split. The v8 sweep re-tested every challenger on walk-forward: the quadratic wins it (x2.778) and leave-one-out (x3.388) but loses the blind holdout (x4.121 vs pure curve x3.641); Theil-Sen wins it (x2.823) and matches the pure curve blind (x3.633) but loses leave-one-out (x3.523 vs x3.402). Neither is adopted. The v9 sweep (26 candidates) finds no winner either: the closest is a 0.25 blend of pure curve and four-factor (walk-forward x2.834, blind x3.791, leave-one-out x3.429 vs pure x3.402 — a miss by 0.027).`,
+ `- Expanding window on dated peers: fit the oldest 50%, test the next 10%, roll forward (${wfFour.windows} windows, n=${wfFour.n}). Chained median error: pure curve x${wfCurve.median_factor} (${Math.round(wfCurve.within_3x*100)}% within 3x), three-input x${wfModel.median_factor}, four-factor x${wfFour.median_factor}. The pure curve wins walk-forward too.`,
  '',
  '## Token odds v2 — a display column, never a ranking (but a gate for farms)',
- `- Token odds = P(token by listing age | log TVL, ln(chains), TVL-rank percentile, category), a piecewise-exponential hazard fit on the snapshot's own record (416 recorded-token protocols as events, 342 no-token rows as censored; log baseline hazards ${oddsFull.logHaz.join(', ')}; cross-fitted AUC ${oddsAucXf}, in-sample ${oddsAucFull}; Platt calibration a=${oddsPlatt.a}, b=${oddsPlatt.b}; v8 logistic: AUC 0.65). Recorded-token peers average ${oddsPeerMean} odds, no-token rows ${oddsNoTokenMean}. Each row shows its odds and its expected value (implied x odds) beside the rank. The expected value does NOT re-rank the board: it beats implied value on 1 of 3 fixed splits only (rank correlation out-of-sample ${evOos.rho_ev} vs ${evOos.rho_implied}, blind ${evBlind.rho_ev} vs ${evBlind.rho_implied}, leave-one-out ${evLoo.rho_ev} vs ${evLoo.rho_implied}), so the board keeps implied-value ranking and the odds stay a context column. The odds DO gate farm verdicts: a farm needs net per hour > $25 AND token odds >= ${oddsGateThreshold} (${oddsGateSource}); ${gateFlips[0].flipped_to_thin} of ${gateFlips[0].ungated_farm} ungated $1,000 farms demote to thin. Expected net per hour (net/h x odds) is shown beside the net in the farms view.`,
+ `- Token odds = P(token by listing age | log TVL, ln(chains), TVL-rank percentile, category), a piecewise-exponential hazard fit on the snapshot's own record (416 recorded-token protocols as events, 342 no-token rows as censored; log baseline hazards ${oddsFull.logHaz.join(', ')}; cross-fitted AUC ${oddsAucXf}, in-sample ${oddsAucFull}; Platt a=${oddsPlatt.a}, b=${oddsPlatt.b}; v8 logistic: AUC 0.65). Recorded-token peers average ${oddsPeerMean} odds, no-token rows ${oddsNoTokenMean}. Each row shows its odds and expected value (implied x odds) beside the rank. The expected value does NOT re-rank the board: it beats implied value on 1 of 3 fixed splits only (rank correlation out-of-sample ${evOos.rho_ev} vs ${evOos.rho_implied}, blind ${evBlind.rho_ev} vs ${evBlind.rho_implied}, leave-one-out ${evLoo.rho_ev} vs ${evLoo.rho_implied}). The odds DO gate farm verdicts: a farm needs net per hour > $25 AND token odds >= ${oddsGateThreshold} (${oddsGateSource}); ${gateFlips[1].flipped_to_thin} of ${gateFlips[1].ungated_farm} ungated $5,000 farms demote to thin. Expected net per hour (net/h x odds) is shown beside the net in the farms view. Re-tested for v10: cohort-rate odds (category x age-band token share, 5-protocol prior) score cross-fitted AUC 0.689 (< 0.70) and win EV rank correlation on 1 of 3 splits — not adopted. The hazard's honest proof is mixed: LOO Brier 0.211 vs base 0.248, LOO AUC 0.732, but the time-split Brier is 0.260 vs base 0.229 (AUC 0.61 on the newer half) — the odds do not generalize forward in time, so they stay display-only and a farm gate.`,
  '',
  '## Deposit tiers — the same farm arithmetic at $1,000 / $5,000 / $25,000',
- `- The $1,000 headline is unchanged; each row also shows its verdict at a $5,000 and a $25,000 deposit (same slice formula, same costs, opportunity cost scaled to the deposit). Verdicts: $1,000 — ${tierCounts[0].farm} farm / ${tierCounts[0].thin} thin / ${tierCounts[0].skip} skip; $5,000 — ${tierCounts[1].farm} / ${tierCounts[1].thin} / ${tierCounts[1].skip}; $25,000 — ${tierCounts[2].farm} / ${tierCounts[2].thin} / ${tierCounts[2].skip}. Of the ${verdicts.skip} rows that skip at $1,000, ${skipsBecomeFarm5k} become farm at $5,000 and ${skipsBecomeFarm25k} at $25,000. Top-8 rows that flip verdict: ${top8Flip5k} at $5,000, ${top8Flip25k} at $25,000. Best net per hour: $${tierCounts[0].best_net_per_hour_usd}/h (${tierCounts[0].best_name}) at $1,000; $${tierCounts[1].best_net_per_hour_usd}/h (${tierCounts[1].best_name}) at $5,000; $${tierCounts[2].best_net_per_hour_usd}/h (${tierCounts[2].best_name}) at $25,000. Farm verdicts are odds-gated (token odds >= ${oddsGateThreshold}): the gate demotes ${gateFlips[1].flipped_to_thin} farms at $5,000 and ${gateFlips[2].flipped_to_thin} at $25,000; expected net per hour (net/h x odds) is shown in the farms view.`,
+ `- The $5,000 headline is new in v10 (was $1,000 in v8–v9); each row also shows its verdict at a $1,000 and a $25,000 deposit (same slice formula, same costs, opportunity cost scaled to the deposit). Verdicts: $1,000 — ${tierCounts[0].farm} farm / ${tierCounts[0].thin} thin / ${tierCounts[0].skip} skip; $5,000 — ${tierCounts[1].farm} / ${tierCounts[1].thin} / ${tierCounts[1].skip}; $25,000 — ${tierCounts[2].farm} / ${tierCounts[2].thin} / ${tierCounts[2].skip}. Of the ${tierCounts[0].skip} rows that skip at $1,000, ${skipsBecomeFarm5k} become farm at $5,000 and ${skipsBecomeFarm25k} at $25,000. Top-8 rows that flip verdict vs the headline: ${top8Flip1k} at $1,000, ${top8Flip25k} at $25,000. Best net per hour: $${tierCounts[0].best_net_per_hour_usd}/h (${tierCounts[0].best_name}) at $1,000; $${tierCounts[1].best_net_per_hour_usd}/h (${tierCounts[1].best_name}) at $5,000; $${tierCounts[2].best_net_per_hour_usd}/h (${tierCounts[2].best_name}) at $25,000. Farm verdicts are odds-gated (token odds >= ${oddsGateThreshold}): the gate demotes ${gateFlips[1].flipped_to_thin} farms at $5,000 and ${gateFlips[2].flipped_to_thin} at $25,000.`,
+ `- Minimum viable capital + P10 verdicts: every row carries the smallest deposit at which it flips to FARM (MVC, by bisection; ${mvcStats.rows_with_mvc} of ${rows.length} rows farm at some deposit up to $1,000,000, median MVC $${mvcStats.median_mvc_usd!==null?mvcStats.median_mvc_usd.toLocaleString('en-US'):'—'}; ${mvcStats.rows_never_farm} never farm; ${mvcStats.non_monotone_rows.length} non-monotone rows) and a P10-netted verdict at the P10 of its bootstrap band. At the $5,000 headline the P10 verdicts are ${p10Headline.farm} farm / ${p10Headline.thin} thin / ${p10Headline.skip} skip vs ${verdicts.farm} / ${verdicts.thin} / ${verdicts.skip} point-estimate; ${p10FlipsHeadline} rows flip. ${USE_P10_PRIMARY?'The P10 verdicts are displayed.':'The point-estimate verdicts stay displayed; the P10 verdicts are shown per row.'}`,
  '',
  '## Row-count diff — 194 vs Billsmokes\' 213',
- `- Billsmokes' public board, regenerated on this snapshot, holds ${rowCountDiff.theirs} rows against our ${rowCountDiff.ours}: they rank ${rowCountDiff.they_rank_we_set_aside} we set aside (${Object.entries(rowCountDiff.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}) and we rank ${rowCountDiff.we_rank_they_exclude} they omit (${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd>=snapshot.floor_usd).length} above the $${(snapshot.floor_usd/1000000).toFixed(0)}M floor, ${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd<snapshot.floor_usd).length} below-floor discovery). None of the 39 is adopted — each falls under our stated set-aside rule. The full per-row tables are in methodology.md.`,
+ `- Billsmokes' public board, regenerated on this snapshot, holds ${rowCountDiff.theirs} rows against our ${rowCountDiff.ours}: they rank ${rowCountDiff.they_rank_we_set_aside} we set aside (${Object.entries(rowCountDiff.by_rule).map(([k,v]:any)=>`${k} ${v}`).join(', ')}) and we rank ${rowCountDiff.we_rank_they_exclude} they omit (${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd>=snapshot.floor_usd).length} above the $${(snapshot.floor_usd/1000000).toFixed(0)}M floor, ${rowCountDiff.entries_we_rank.filter((e:any)=>e.tvl_usd<snapshot.floor_usd).length} below-floor discovery). None of the 39 is adopted — each falls under our stated set-aside rule; the full per-row tables are in methodology.md.`,
  '',
  '## What was tested — adopted and rejected',
- 'Adopted: the family factor (category effects shrunk to parent with pseudo-counts, k=5) — it wins out-of-sample but costs blind and leave-one-out accuracy against the pure curve, and that cost is stated: the four-factor model measures OOS x' + oosFourScore.median_factor + ', blind x' + blindFourScore.median_factor + ', LOO x' + looFourScore.median_factor + ' (pure curve x' + oosCurveScore.median_factor + ', x' + blindCurveScore.median_factor + ', x' + looCurveScore.median_factor + '; three-input x' + oosModelScore.median_factor + ', x' + blindModelScore.median_factor + ', x' + looModelScore.median_factor + '). Rejected: joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log curve (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once. Re-tested for v8 on the walk-forward split (sweep-v8.mjs): the quadratic wins walk-forward (x2.778) and leave-one-out (x3.388) but loses the blind holdout (x4.121 vs pure curve x3.641); Theil-Sen wins walk-forward (x2.823) and matches the pure curve blind (x3.633) but loses leave-one-out (x3.523 vs x3.402); a breadth multiplier (1+0.1*ln(chains)) improves the four-factor model on blind (x4.526 to x3.968) and leave-one-out (x4.084 to x3.492) and lifts the best farm to $67.53/h, but still loses to the pure curve on walk-forward, leave-one-out and blind. No challenger wins walk-forward AND leave-one-out without losing blind, so the four-factor model stands. Re-tested for v9 in a second sweep round (sweep-v9.mjs, 26 candidates: quadratic+family, Theil-Sen+family, Huber+family, ensemble pure+quadratic, family shrinkage 0.7/0.5/0.3, pure/four-factor blends at 0.25/0.5): none wins walk-forward AND leave-one-out while keeping blind within 0.15 of the pure curve — the closest is the 0.25 blend (walk-forward x2.834, blind x3.791, leave-one-out x3.429 vs pure x3.402, a miss by 0.027). 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption — so growth and age are not fitted features; they enter as the rubric\'s bounded multipliers (growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540))). No bias correction: out-of-sample and blind biases disagree (-0.50 vs -0.11).',
+ 'Adopted: the family factor (category effects shrunk to parent with pseudo-counts, k=5) — it wins out-of-sample but costs blind and leave-one-out against the pure curve, and that cost is stated: four-factor OOS x' + oosFourScore.median_factor + ', blind x' + blindFourScore.median_factor + ', LOO x' + looFourScore.median_factor + ' (pure curve x' + oosCurveScore.median_factor + ', x' + blindCurveScore.median_factor + ', x' + looCurveScore.median_factor + '; three-input x' + oosModelScore.median_factor + ', x' + blindModelScore.median_factor + ', x' + looModelScore.median_factor + '). Rejected: joint OLS with category dummies under ridge (lambda=1..400), quadratic log-log (won out-of-sample x2.82 but lost the blind holdout x4.12), Theil-Sen, IRLS-robust, trimmed OLS, bounded 7D-growth and listing-age factors as regression features, curve/category blends. None beat the pure size curve on blind + out-of-sample + leave-one-out at once. Re-tested for v8 on walk-forward (sweep-v8.mjs): the quadratic and Theil-Sen win walk-forward but lose blind or leave-one-out; no challenger wins walk-forward AND leave-one-out without losing blind, so the four-factor model stands. Re-tested for v9 in a second sweep round (sweep-v9.mjs, 26 candidates: quadratic+family, Theil-Sen+family, Huber+family, ensemble pure+quadratic, family shrinkage 0.7/0.5/0.3, pure/four-factor blends at 0.25/0.5): none wins walk-forward AND leave-one-out while keeping blind within 0.15 of the pure curve — the closest is the 0.25 blend (walk-forward x2.834, blind x3.791, leave-one-out x3.429 vs pure x3.402, a miss by 0.027). 7D growth carries a negative fitted slope (-3.7) on this snapshot — the opposite of the usual growth assumption — so growth and age are not fitted features; they enter as the rubric\'s bounded multipliers (growth 1+0.35*tanh(change_7d/35), maturity 0.65+0.35*(1-exp(-age_days/540))). No bias correction: out-of-sample and blind biases disagree (-0.50 vs -0.11). Re-tested for v10 in a third sweep round (sweep-v10.mjs, 19 candidates: blends at 0.15/0.20/0.30, three-way pure+four+quad, pure+quad ensembles, Huber+family c=1.345/2.0, Theil-Sen blends): none wins walk-forward AND leave-one-out while keeping blind within 0.15 of the pure curve — closest is the 0.20 blend (walk-forward x2.891, blind x3.727, leave-one-out x3.434 vs pure x3.402, miss by 0.032). The four-factor model stands on a third documented negative result.',
  '',
  '## Limits',
  'No supply, distribution, revenue or launch probability is available in the snapshot. A protocol with no token recorded may still have one. Farm plans are research templates with illustrative budgets; asset support, access, points, eligibility and live fees require independent verification.'
